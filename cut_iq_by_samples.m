@@ -1,39 +1,34 @@
-% 独立脚本：按复采样点数裁切IQ文件并导出（输出为纯数据，无文件头）
-% 已知：输入数据格式=int16小端序，I/Q交织，输入文件头=100字节
+% 独立脚本：按复采样点数裁切IQ文件并导出（输入/输出均为纯数据，无文件头）
+% 已知：数据格式=int16小端序，I/Q交织
 
 clear; clc;
 
 %% 参数区（按需修改）
 inFile = '20250912222305_part1.iq';
-outFile = '20250912222305_part1_cut1.iq';
-
-headerBytes = 100;
-writeHeader = false; % false=输出纯数据（无文件头）
+outFile = '20250912222305_part1_cut2.iq';
 
 startSample = 500000;   % 从第几个“复采样点”开始裁切（0-based）
-numSamples = 1700000;  % 裁切多少个“复采样点”
+endSample = 1700000;   % 裁切到第几个“复采样点”（0-based，包含端点）
+
+numSamples = endSample - startSample + 1;
+if numSamples <= 0
+	error('endSample 必须 >= startSample（且为包含端点的索引）。');
+end
 
 %% 裁切
-iq_cut_by_samples(inFile, outFile, startSample, numSamples, headerBytes, [], writeHeader);
+iq_cut_by_samples(inFile, outFile, startSample, numSamples);
 
 fprintf('裁切完成: %s\n', outFile);
 
 
-function iq_cut_by_samples(inFile, outFile, startSample, numSamples, headerBytes, chunkSamples, writeHeader)
+function iq_cut_by_samples(inFile, outFile, startSample, numSamples, chunkSamples)
 %IQ_CUT_BY_SAMPLES 按复采样点数裁切IQ文件。
 %
 % - 数据格式：int16 little-endian，I/Q交织
-% - 输入文件带文件头（headerBytes，默认100），裁切时会跳过该文件头
-% - writeHeader=true：复制输入文件头到输出文件；false：输出纯数据（无文件头）
+% - 输入/输出均为纯数据（无文件头）
 
-if nargin < 6 || isempty(chunkSamples)
+if nargin < 5 || isempty(chunkSamples)
 	chunkSamples = 2e6;
-end
-if nargin < 5 || isempty(headerBytes)
-	headerBytes = 100;
-end
-if nargin < 7 || isempty(writeHeader)
-	writeHeader = false;
 end
 if startSample < 0 || numSamples < 0
 	error('startSample/numSamples 必须为非负');
@@ -53,20 +48,8 @@ if fout == -1
 end
 cleanupOut = onCleanup(@() fclose(fout));
 
-% 读取输入文件头
-fseek(fin, 0, 'bof');
-header = fread(fin, headerBytes, 'uint8=>uint8');
-if numel(header) ~= headerBytes
-	error('文件头读取失败：期望%d字节，实际读取%d字节。', headerBytes, numel(header));
-end
-
-% 可选：写输出文件头
-if writeHeader
-	fwrite(fout, header, 'uint8');
-end
-
-% 定位输入数据起点（跳过文件头）
-startOffset = headerBytes + startSample * bytesPerComplexSample;
+% 定位输入数据起点
+startOffset = startSample * bytesPerComplexSample;
 status = fseek(fin, startOffset, 'bof');
 if status ~= 0
 	error('fseek失败：startOffset=%d', startOffset);

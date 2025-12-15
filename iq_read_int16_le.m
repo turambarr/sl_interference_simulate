@@ -6,12 +6,12 @@ function [x, meta] = iq_read_int16_le(filename, startSample, numSamples, headerB
 % - filename: .iq文件路径
 % - startSample: 从第几个“复采样点”开始读（0-based）
 % - numSamples: 读取多少个“复采样点”
-% - headerBytes: 头大小（默认100）
+% - headerBytes: 跳过的文件头字节数（默认0；纯数据文件请保持0）
 %
 % 数据格式：int16 little-endian，按 I0,Q0,I1,Q1,... 交织。
 
 if nargin < 4 || isempty(headerBytes)
-    headerBytes = 100;
+    headerBytes = 0;
 end
 if nargin < 3
     error('需要参数: filename, startSample, numSamples');
@@ -27,13 +27,6 @@ if fid == -1
     error('无法打开文件: %s', filename);
 end
 cleanupObj = onCleanup(@() fclose(fid));
-
-% 读取文件头
-fseek(fid, 0, 'bof');
-header = fread(fid, headerBytes, 'uint8=>uint8');
-if numel(header) ~= headerBytes
-    error('文件头读取失败：期望%d字节，实际读取%d字节。', headerBytes, numel(header));
-end
 
 % 定位到数据区
 dataOffset = headerBytes + startSample * bytesPerComplexSample;
@@ -61,5 +54,5 @@ meta.bytesPerComplexSample = bytesPerComplexSample;
 meta.startSample = startSample;
 meta.numSamplesRequested = numSamples;
 meta.numSamplesRead = N;
-meta.header = header;
+meta.header = [];
 end
