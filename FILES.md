@@ -1,0 +1,115 @@
+# 文件功能说明（sl_interference_simulate）
+
+> 约定（重要）：
+> - “复采样点”= 一个复数采样点（I/Q 一对），在二进制里占 `4` 字节（`int16 I` + `int16 Q`，little-endian，I/Q 交织）。
+> - 绝大多数后续脚本按 **0-based 复采样点索引** 计数（第 0 个点就是文件数据区的第一个复采样点）。
+> - 当前工作流默认处理 **纯数据文件（无文件头）**；只有 `read_iq_file.m` 用于解析带 100B 头的原始文件。
+
+---
+
+## 数据文件（.iq）
+
+- `20250912222305_part1.iq`
+  - 原始采集文件（包含 **100 字节文件头** + IQ 数据）。
+  - 仅当你需要研究文件头/确认格式时使用；后续处理建议先裁切成无头纯数据。
+
+- `20250912222305_part1_cut1.iq`
+  - 裁切输出文件（通常约定为 **纯数据无头**）。
+  - 具体由裁切脚本/参数决定。
+
+- `20250912222305_part1_cut2.iq`
+  - 裁切输出文件（通常约定为 **纯数据无头**）。
+  - 当前多数学分析脚本默认以它作为输入。
+
+---
+
+## 读取/格式识别
+
+- `read_iq_file.m`
+  - 作用：读取并打印 **100 字节文件头**（HEX+ASCII），并做“数据类型探测”（例如更像 `int16` 还是 `float32`）。
+  - 典型用途：首次拿到原始文件时确认格式、查看头字段的可能含义。
+  - 备注：这个脚本会从文件偏移 `100` 处开始 probe 数据（即假定头长 100）。
+
+- `iq_read_int16_le.m`
+  - 作用：从 **纯数据文件** 按 `int16 little-endian`、I/Q 交织格式读取，返回复数向量 `x`。
+  - 接口：`[x, meta] = iq_read_int16_le(filename, startSample, numSamples, headerBytes)`
+    - `startSample`：0-based 复采样点起点
+    - `numSamples`：读取复采样点数
+    - `headerBytes`：默认 0；只有在你明确要读取带头文件时才用（当前工作流一般不用）
+  - 依赖：无
+
+---
+
+## 裁切（输出纯数据）
+
+- `cut_iq_by_samples.m`
+  - 作用：按复采样点范围裁切 IQ 文件，输出到新文件。
+  - 用法：编辑脚本顶部参数：
+    - `startSample`（0-based，起点）
+    - `endSample`（0-based，包含端点）
+  - 输出：写出 `outFile`，按脚本注释约定为 **纯数据无头**。
+  - 重要备注：此脚本内部使用 `fseek(fin, startSample*4, 'bof')`，因此输入文件应当是“数据区从文件起始开始”的纯数据文件；如果你拿它直接裁 `20250912222305_part1.iq`（带 100B 头），需要你自己先处理头偏移，否则会错位裁切。
+
+---
+
+## 时域/频域可视化
+
+- `plot_time_domain.m`
+  - 作用：读取一段 IQ 数据并绘制 **时域幅度 |IQ|**（横轴为样点索引）。
+  - 特点：启用 `zoom/pan/datacursormode`，可放大与点选查看坐标。
+  - 输入：默认按纯数据读取（通过 `iq_read_int16_le`）。
+
+- `plot_psd.m`
+  - 作用：对一段 IQ 数据做 Welch 方法功率谱密度（PSD）估计并绘图。
+  - 特点：Welch PSD 为脚本内自实现（Hann 窗 + 分段平均 + `fftshift`），尽量避免工具箱依赖。
+  - 可选：显示绝对频率 `Fc+f` 或基带频率 `f`。
+
+- `plot_psd_blocks.m`
+  - 作用：在 `[startSample, endSample]` 范围内分块读取，每块计算一张 PSD，并按网格分页显示。
+  - 适用：观察频谱随时间/样点变化。
+  - 备注：脚本注释写“每 50000 点”，实际参数由 `blockLen` 控制；以脚本参数为准。
+
+---
+
+## OFDM 符号定位（基于 CP 相关）
+
+- `locate_ofdm_symbols_cp.m`
+  - 作用：在给定 `N`（FFT 长度）与 `Ng`（CP 长度）下，通过 CP 相关度量定位 OFDM 符号边界。
+  - 核心度量：
+    - $P(d)=\sum_{k=0}^{Ng-1} x[d+k]\,\overline{x[d+k+N]}$
+    - $R(d)=\sum_{k=0}^{Ng-1} |x[d+k+N]|^2$
+    - $M(d)=\frac{|P(d)|^2}{R(d)^2+\epsilon}$
+  - 输出变量：
+    - `symCpStart0`：每个符号 CP 起点（0-based 复采样点索引）
+    - `symDataStart0`：每个符号数据起点（0-based）= `symCpStart0 + Ng`
+  - 鲁棒性增强：当前版本会尝试多个 top 峰作为锚点，按“整列符号边界的一致性（symRel 上 M 的均值）”选择最优锚点，减少真实信号里被杂峰带跑偏的概率。
+  - 诊断输出：打印 `M(d)` 的统计量/分位数、`symRel` 处的 `M` 统计、全局 top 峰位置与峰间隔，用于判断“度量是否尖锐/是否呈现 Lsym 周期”。
+
+---
+
+## “切片自证”（CP 首尾相似度验证）
+
+- `segment_head_tail_similarity.m`
+  - 作用：量化两段序列的“首尾相似程度”，常用于 OFDM CP 自证：
+    - head = `x[d0 : d0+L-1]`
+    - tail = `x[d0+offset : d0+offset+L-1]`（OFDM 常用 `offset=N`，`L=Ng`）
+  - 输出 `result`：包含 `rho`（归一化复相关系数）、`|rho|`、相位、幅度 RMS 比、NMSE/NMSE(dB) 等，并可选画图对比。
+  - 备注：为兼容无工具箱环境，幅度 RMS 使用 `sqrt(mean(|x|^2))` 实现。
+
+- `run_segment_similarity.m`
+  - 作用：参数入口脚本，只负责：选择输入文件、选择 `d0/N/Ng`、设置扫描/绘图选项，然后调用 `segment_head_tail_similarity`。
+  - 功能：
+    - `d0` 附近扫描（`scanRadius/scanStep`），自动找 `|rho|` 最大（或 NMSE(dB) 最小）的点
+    - 输出 center/best/top candidates，判断是否“只差少量采样点”
+    - 可选参数扫描：`offsetCandidates` / `LCandidates`，快速排查 `N/Ng` 是否配错
+  - 备注：脚本会 `clearvars -except symCpStart0 symDataStart0`，以便你先运行 `locate_ofdm_symbols_cp.m` 后复用其输出。
+
+---
+
+## 其他
+
+- `.gitignore`
+  - Git 忽略规则文件（不影响 MATLAB 功能）。
+-
+- `.git/`
+  - Git 仓库元数据目录。

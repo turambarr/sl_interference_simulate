@@ -1,0 +1,39 @@
+% 参数脚本：任意段“首尾相似程度”检测（CP自证）
+% 说明：此脚本只放参数与调用，算法在 segment_head_tail_similarity.m
+
+% 注意：如果你希望直接复用 locate_ofdm_symbols_cp.m 的输出 symCpStart0，
+% 不要把它 clear 掉。
+clearvars -except symCpStart0 symDataStart0;
+
+%% 参数区（按需修改）
+% 输入为纯数据（无文件头）：int16 小端序，I/Q交织
+inFile = '20250912222305_part1_cut2.iq';
+
+% OFDM已知参数
+N = 1024;
+Ng = 192;
+
+% 选择一个起点 d0（0-based复采样点索引）
+% 方式A：手工指定
+% d0 = 123456;
+
+% 方式B：如果你在同一个MATLAB会话里先运行了 locate_ofdm_symbols_cp.m
+% 里面会生成 symCpStart0，则可以直接取其中一个
+if exist('symCpStart0', 'var') && ~isempty(symCpStart0)
+    idx = min(150, numel(symCpStart0));
+    d0 = symCpStart0(idx);
+else
+    d0 = 0; % 默认从0开始（你通常需要改成检测到的符号起点）
+end
+
+% 这里的“首尾”定义：对比 [d0 .. d0+Ng-1] 与 [d0+N .. d0+N+Ng-1]
+offset = N;
+L = Ng;
+
+opts = struct();
+opts.normalizeToUnit = true;
+opts.removeMean = true;
+opts.makePlot = true;
+
+%% 调用
+result = segment_head_tail_similarity(inFile, d0, offset, L, opts);
