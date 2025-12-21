@@ -9,7 +9,7 @@
 clear; clc;
 
 %% 参数区（按需修改）
-inFile = '20250912222305_part1_cut2.iq';
+inFile = '20250912222305_part1_cut3.iq';
 
 Fs = 409.6e6;   % Hz（仅用于可选显示）
 N = 1024;       % 有效符号长度（FFT点数）

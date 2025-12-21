@@ -5,10 +5,10 @@ clear; clc;
 
 %% 参数区（按需修改）
 inFile = '20250912222305_part1.iq';
-outFile = '20250912222305_part1_cut2.iq';
+outFile = '20250912222305_part1_cut3.iq';
 
-startSample = 500000;   % 从第几个“复采样点”开始裁切（0-based）
-endSample = 1700000;   % 裁切到第几个“复采样点”（0-based，包含端点）
+startSample = 303104;   % 从第几个“复采样点”开始裁切（0-based）
+endSample = 348159;   % 裁切到第几个“复采样点”（0-based，包含端点）
 
 numSamples = endSample - startSample + 1;
 if numSamples <= 0
