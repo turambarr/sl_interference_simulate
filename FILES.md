@@ -85,6 +85,31 @@
   - 鲁棒性增强：当前版本会尝试多个 top 峰作为锚点，按“整列符号边界的一致性（symRel 上 M 的均值）”选择最优锚点，减少真实信号里被杂峰带跑偏的概率。
   - 诊断输出：打印 `M(d)` 的统计量/分位数、`symRel` 处的 `M` 统计、全局 top 峰位置与峰间隔，用于判断“度量是否尖锐/是否呈现 Lsym 周期”。
 
+- `estimate_ofdm_cp_locations.m`
+  - 作用：将 OFDM CP 定位逻辑封装成**可复用函数**（供主入口或其他脚本调用）。
+  - 输入：`inFile, N, Ng, startSample0, endSample0, Fs, opts`
+  - 输出：结构体 `out`，包含：
+    - `out.symCpStart0 / out.symDataStart0`
+    - `out.diag`：包含 `M(d)`、锚点选择信息、top 峰、统计量等
+  - 备注：`locate_ofdm_symbols_cp.m` 现在是一个薄封装脚本，内部调用本函数并负责绘图。
+
+---
+
+## 估计功能主入口
+
+- `estimate_main.m`
+  - 作用：将“估计/检测类功能”统一到一个主入口，通过 `action` 参数选择要运行的功能。
+  - 当前支持：
+    - `action='ofdm_cp'`：OFDM CP 定位（调用 `estimate_ofdm_cp_locations.m`）
+    - `action='guard_intervals'`：帧间保护间隔检测（调用 `find_frame_guard_intervals.m`）
+  - 明确不包含：验证类功能（例如 `segment_head_tail_similarity.m` / `run_segment_similarity.m`）。
+
+- `run_estimate_main.m`
+  - 作用：**点击运行版**参数脚本。在脚本顶部填写 `action` 与参数，直接运行即可调用 `estimate_main`。
+  - 支持：
+    - `action='ofdm_cp'`：运行 OFDM CP 定位，并可选绘制 `M(d)` 曲线与符号起点标记
+    - `action='guard_intervals'`：运行帧间保护间隔检测，并可选绘图
+
 ---
 
 ## “切片自证”（CP 首尾相似度验证）
@@ -103,6 +128,20 @@
     - 输出 center/best/top candidates，判断是否“只差少量采样点”
     - 可选参数扫描：`offsetCandidates` / `LCandidates`，快速排查 `N/Ng` 是否配错
   - 备注：脚本会 `clearvars -except symCpStart0 symDataStart0`，以便你先运行 `locate_ofdm_symbols_cp.m` 后复用其输出。
+
+---
+
+## 帧间保护间隔（Guard Interval）检测
+
+- `find_frame_guard_intervals.m`
+  - 作用：在真实信号中自动寻找“帧（burst）—保护间隔（低能量gap）—帧（burst）”结构，输出每帧区间与帧间保护间隔区间。
+  - 方法：短时能量包络（滑动窗口）→ 平滑 → 自适应阈值（默认 median+K*MAD）→ 连通段提取。
+  - 输入：IQ 纯数据文件路径 + 搜索范围 `[startSample0, endSample0]`（均为 0-based 复采样点索引）。
+  - 输出：
+    - `framesStart0/framesEnd0`：每个帧（burst）区间
+    - `guardsStart0/guardsEnd0`：相邻两帧之间的保护间隔区间
+    - `energyBins0/energy/threshold`：能量bin索引、能量序列、阈值（便于诊断）
+  - 备注：边界定位受 `winLen` 影响（约 `winLen` 量级的时间模糊），需要更精确边界时可对结果附近二次精细化。
 
 ---
 
