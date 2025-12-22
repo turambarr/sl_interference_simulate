@@ -8,10 +8,10 @@ clear; clc;
 
 %% 选择功能
 % 可选：'ofdm_cp' 或 'guard_intervals'
-action = 'guard_intervals';
-
+% action = 'guard_intervals';
+action = 'ofdm_cp';
 %% 通用输入
-inFile = '20250912222305_part1_cut2.iq';
+inFile = 'test4.iq';
 startSample0 = 0;
 endSample0 = []; % [] 表示到文件尾
 
