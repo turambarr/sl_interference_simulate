@@ -6,7 +6,7 @@
 clear; clc;
 
 %% 参数区（按需修改）
-inFile = 'test1.iq';
+inFile = 'test2.iq';
 
 % 如果只想取 test1 的一部分，可在这里设置（0-based，针对 test1 文件内部）
 startSample0 = 0;
