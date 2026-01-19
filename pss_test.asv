@@ -31,18 +31,10 @@ for k = 1 : L_block
 end
 
 % 构建时域 PSS:
-% 结构: [B, B, -B, B, -B, B, -B, B]
-% 1. (B, B)   -> +1
-% 2. (B, -B)  -> -1 (负峰起始)
-% 3. (-B, B)  -> -1
-% 4. (B, -B)  -> -1
-% 5. (-B, B)  -> -1
-% ...
-pattern_signs = [1, 1, -1, 1, -1, 1, -1, 1];
-pss_signal = [];
-for s = pattern_signs
-    pss_signal = [pss_signal, s * pss_block_base];
-end
+% 原结构: [Block0(-B), B, B, B, B, B, B, B]
+% 新要求: 反相块放到第3个 (Index 2, 0-based)
+% 结构变更为: [B, B, Block2(-B), B, B, B, B, B]
+pss_signal = [pss_block_base, pss_block_base, -pss_block_base, repmat(pss_block_base, 1, 5)];
 
 % --- (2) 生成 SSS (简化为随机 OFDM 符号) ---
 sss_signal = gen_ofdm_symbol(N);
@@ -75,8 +67,8 @@ rx_signal = tx_signal + noise_awgn;
 % 原理: P(d) = sum( r(m)' * r(m+L) )
 % 窗口 W = 128, 延迟 D = 128
 
-W = 128; % 积分窗口长度
-D = 128; % 延迟长度
+W = 128*2; % 积分窗口长度
+D = 128*2; % 延迟长度
 
 % 构造延迟流: r(n+D)
 % 有效长度: length(rx) - D
