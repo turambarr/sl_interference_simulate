@@ -14,8 +14,8 @@ normalizeToUnit = true; % int16/32768
 removeMean = true;      % 去直流
 
 % W = 871;                % 窗长（固定 128）
-D = 5888+1104;
-W = 1104;
+D = 874;
+W = 874;
 %% 读取
 [x, meta] = iq_read_int16_le(inFile, startSample0, local_num_samples(inFile, numSamples, startSample0));
 L = meta.numSamplesRead;

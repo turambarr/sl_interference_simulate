@@ -9,7 +9,7 @@
 clear; clc;
 
 %% 参数区（按需修改）
-inFile = 'test2.iq';
+inFile = 'sigtest1.iq';
 
 startSample0 = 0;   % 0-based
 numSamples = [];    % [] 表示读到文件尾（文件很大时建议给一个有限值）

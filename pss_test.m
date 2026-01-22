@@ -2,6 +2,7 @@ clc; clear; close all;
 
 %% 1. 参数配置
 N = 1024;               % 符号长度 (FFT Size)
+oversample_K = 4;       % 过采样因子 (Oversampling Factor)
 L_block = 128;          % PSS 分块长度 (N/8)
 SNR_dB = 15;            % 信噪比
 num_data_symbols = 4;   % 模拟的数据符号数量 (Data Payload)
@@ -61,6 +62,43 @@ noise_post = (randn(1, noise_len) + 1j*randn(1, noise_len)) * 0.1;
 
 tx_signal = [noise_pre, pss_signal, sss_signal, data_payload, noise_post];
 
+%% 3.5 过采样模拟 (Upsampling)
+if oversample_K > 1
+    fprintf('Applying Oversampling x%d...\n', oversample_K);
+    
+    % 重采样发射信号
+    tx_signal = resample(tx_signal, oversample_K, 1);
+    
+    % 重采样 PSS 模板 (用于互相关)
+    pss_signal = resample(pss_signal, oversample_K, 1);
+    
+    % 更新所有相关长度参数
+    noise_len = floor(noise_len * oversample_K); % 近似更新
+    N = N * oversample_K;
+    L_block = L_block * oversample_K;
+    
+    % 注意: gen_ofdm_symbol 内的逻辑是频域生成的，不用改，只要后续处理用的 N 对就行
+end
+
+%% 3.6 降采样测试 (To 2048)
+% 模拟 ADC 采样率低于过采样后的模拟信号采样率
+target_N = 1025;
+if N > target_N
+    fprintf('Applying Downsampling to N=%d (Current N=%d)...\n', target_N, N);
+    
+    % 使用有理数近似比例
+    [num, den] = rat(target_N / N);
+    
+    tx_signal = resample(tx_signal, num, den);
+    pss_signal = resample(pss_signal, num, den);
+    
+    % 更新参数
+    ratio = target_N / N;
+    noise_len = floor(noise_len * ratio);
+    N = target_N;
+    L_block = floor(L_block * ratio);
+end
+
 %% 4. 添加信道噪声 (AWGN)
 sig_power = mean(abs(tx_signal).^2);
 noise_power = sig_power / (10^(SNR_dB/10));
@@ -73,10 +111,10 @@ rx_signal = tx_signal + noise_awgn;
 
 % === 算法 A: 滑动自相关 (Sliding Autocorrelation) ===
 % 原理: P(d) = sum( r(m)' * r(m+L) )
-% 窗口 W = 128, 延迟 D = 128
+% 窗口 W = L_block, 延迟 D = L_block
 
-W = 128; % 积分窗口长度
-D = 128; % 延迟长度
+W = L_block; % 积分窗口长度 (128 * K)
+D = L_block; % 延迟长度 (128 * K)
 
 % 构造延迟流: r(n+D)
 % 有效长度: length(rx) - D
@@ -156,6 +194,35 @@ title('互相关 (Matched Filter) - 精确检测峰值');
 ylabel('归一化相关值'); xlim([1 length(rx_signal)]);
 grid on;
 xline(noise_len, 'r--', 'True Start');
+
+%% 7. PSS 星座图分析
+% 提取接收信号中的 PSS 全长 (1024点)
+pss_rx_full = rx_signal(noise_len + 1 : noise_len + length(pss_signal));
+
+% 提取 PSS 的第一个 Block (长度 128*K)
+% 也就是所谓的 "取 PSS 的 1/8" (因为 1024/128 = 8)
+L_unit = L_block;
+pss_rx_block1 = pss_rx_full(1 : L_unit);
+
+figure('Position', [1120, 100, 600, 800], 'Name', 'PSS Constellation');
+
+% 上图：完整 PSS (1024*K 点)
+subplot(2,1,1);
+plot(real(pss_rx_full), imag(pss_rx_full), 'b.', 'MarkerSize', 6);
+hold on; xline(0,'k'); yline(0,'k'); grid on; axis equal;
+title(sprintf('完整 PSS (%d 点) 星座图 (SNR=%d dB)', length(pss_rx_full), SNR_dB));
+xlabel('I'); ylabel('Q');
+
+% 下图：单截段 PSS (128*K 点)
+subplot(2,1,2);
+plot(real(pss_rx_block1), imag(pss_rx_block1), 'r.', 'MarkerSize', 8);
+hold on; xline(0,'k'); yline(0,'k'); grid on; axis equal;
+title(sprintf('PSS 第一个块 (%d 点) 星座图', length(pss_rx_block1)));
+xlabel('I'); ylabel('Q');
+
+% 简单的 EVM 估计
+evm_val = std(abs(pss_rx_full) - mean(abs(pss_rx_full)));
+text(min(xlim)*0.8, min(ylim)*0.8, sprintf('Full Amp Std: %.4f', evm_val));
 
 %% 辅助函数: 生成随机 OFDM 符号
 function sym = gen_ofdm_symbol(N)
