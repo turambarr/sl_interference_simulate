@@ -5,10 +5,10 @@ clear; clc;
 
 %% 参数区（按需修改）
 inFile = '20250912222305_part1.iq';
-outFile = 'sigtest11.iq';
+outFile = 'sigtest12.iq';
 
-startSample = 16687104-10000;   % 从第几个“复采样点”开始裁切（0-based）
-endSample = 16731135+10000;   % 裁切到第几个“复采样点”（0-based，包含端点）
+startSample = 14475;   % 从第几个“复采样点”开始裁切（0-based）
+endSample = 14475+6992+874+874+874+874;   % 裁切到第几个“复采样点”（0-based，包含端点）
 
 numSamples = endSample - startSample + 1;
 if numSamples <= 0

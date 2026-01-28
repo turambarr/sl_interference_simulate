@@ -45,6 +45,10 @@ for s = pattern_signs
     pss_signal = [pss_signal, s * pss_block_base];
 end
 
+% 新增需求: 拼一个 -B 的前32个点在序列最后面 (Cyclic Suffix)
+suffix_len = 32;
+pss_signal = [pss_signal, -pss_block_base(1:suffix_len)];
+
 % --- (2) 生成 SSS (简化为随机 OFDM 符号) ---
 sss_signal = gen_ofdm_symbol(N);
 
@@ -62,42 +66,8 @@ noise_post = (randn(1, noise_len) + 1j*randn(1, noise_len)) * 0.1;
 
 tx_signal = [noise_pre, pss_signal, sss_signal, data_payload, noise_post];
 
-%% 3.5 过采样模拟 (Upsampling)
-if oversample_K > 1
-    fprintf('Applying Oversampling x%d...\n', oversample_K);
-    
-    % 重采样发射信号
-    tx_signal = resample(tx_signal, oversample_K, 1);
-    
-    % 重采样 PSS 模板 (用于互相关)
-    pss_signal = resample(pss_signal, oversample_K, 1);
-    
-    % 更新所有相关长度参数
-    noise_len = floor(noise_len * oversample_K); % 近似更新
-    N = N * oversample_K;
-    L_block = L_block * oversample_K;
-    
-    % 注意: gen_ofdm_symbol 内的逻辑是频域生成的，不用改，只要后续处理用的 N 对就行
-end
+% (User requested removal of oversampling/downsampling logic)
 
-%% 3.6 降采样测试 (To 2048)
-% 模拟 ADC 采样率低于过采样后的模拟信号采样率
-target_N = 1025;
-if N > target_N
-    fprintf('Applying Downsampling to N=%d (Current N=%d)...\n', target_N, N);
-    
-    % 使用有理数近似比例
-    [num, den] = rat(target_N / N);
-    
-    tx_signal = resample(tx_signal, num, den);
-    pss_signal = resample(pss_signal, num, den);
-    
-    % 更新参数
-    ratio = target_N / N;
-    noise_len = floor(noise_len * ratio);
-    N = target_N;
-    L_block = floor(L_block * ratio);
-end
 
 %% 4. 添加信道噪声 (AWGN)
 sig_power = mean(abs(tx_signal).^2);

@@ -1,0 +1,73 @@
+% constellation_interp.m
+% 使用插值法 (interp1) 进行非整数倍降采样并绘制星座图
+% 目的：替代 resample 函数，更精确地控制采样时刻（相位），解决采样点对不准的问题
+
+clear; clc; close all;
+
+%% 1. 参数设置
+inFile = 'sigtest1.iq'; 
+startSample = 15530-874;   % 读取起始点
+readLen     = 874*8;           % 读取长度 (适当读长一点，保证足够插值)
+
+D = 6.82;                 % 降采样倍率 (每个符号占用的原始样点数)
+interpolation_method = 'spline'; % 插值方法: 'linear', 'spline', 'pchip'
+
+%% 2. 读取原始数据
+fprintf('读取文件: %s (Start=%d, Len=%d)\n', inFile, startSample, readLen);
+[x_raw, ~] = iq_read_int16_le(inFile, startSample, readLen);
+x_raw = double(x_raw);
+x_raw = x_raw - mean(x_raw); % 去直流
+
+% 归一化幅度
+x_raw = x_raw / mean(abs(x_raw));
+
+%% 3. 插值核心逻辑
+% 原始时间轴: 0, 1, 2, ..., N-1
+t_raw = 0:(length(x_raw)-1);
+
+% 我们尝试搜索最佳的采样相位 (Offset)
+% 采样时刻 = initial_offset + k * D
+% initial_offset 的范围通常在 [0, D) 之间
+phrases_to_test = 0 : 0.05 : 0.95; % 更细致的扫描：间隔 0.05 (共20个)
+num_plots = length(phrases_to_test);
+
+% --- 修改：分两页显示 (2 Figures) ---
+for fig_idx = 1:2
+    figure('Position', [50, 50, 1600, 700], 'Name', sprintf('Constellation Interp - Page %d', fig_idx));
+    
+    start_idx = (fig_idx - 1) * 10 + 1;
+    end_idx   = min(fig_idx * 10, num_plots);
+
+    for i = start_idx:end_idx
+        offset_ratio = phrases_to_test(i);
+        current_offset = offset_ratio * D;
+        
+        % --- 构造新的采样时间点 ---
+        % 从 current_offset 开始，每次步进 D，直到不超过原始数据长度
+        t_new = current_offset : D : (length(x_raw)-1);
+        
+        % --- 执行插值 (interp1) ---
+        x_resampled = interp1(t_raw, x_raw, t_new, interpolation_method);
+        
+        % --- 绘图 ---
+        sub_idx = i - start_idx + 1;
+        subplot(2, 5, sub_idx);
+        
+        % 绘制所有点 (不再区分奇偶)
+        plot(x_resampled, '.', 'Color', 'b', 'MarkerSize', 4);
+        
+        axis square; grid on;
+        title(sprintf('Offset = %.2f * D', offset_ratio));
+        xlabel('I'); ylabel('Q');
+        xlim([-2 2]); ylim([-2 2]);
+    end
+    sgtitle(sprintf('Page %d: 插值法重采样星座图 (D = %.4f)', fig_idx, D));
+end
+
+fprintf('\n=== 实现原理说明 ===\n');
+fprintf('1. 原始时间: t_raw = 0 : 1 : L-1\n');
+fprintf('2. 目标时间: t_new = offset : D : L-1\n');
+fprintf('   其中 D=%.4f 是符号速率的比值。\n', D);
+fprintf('3. 核心函数: y = interp1(t_raw, x_raw, t_new, ''%s'')\n', interpolation_method);
+fprintf('   这相当于在连续时间波形上，精确地每隔 D 间隔取一个点。\n');
+fprintf('   通过调整 offset (即图中的 Offset)，可以找到最佳的“眼图张开”时刻。\n');

@@ -8,7 +8,7 @@ clear; clc;
 inFile = 'sigtest1.iq';
 
 startSample0 = 0;   % 0-based
-numSamples = [];    % [] 表示读到文件尾（如果文件很大，建议改成一个有限值）
+numSamples = 50000;    % [] 表示读到文件尾（如果文件很大，建议改成一个有限值）
 
 normalizeToUnit = true; % int16/32768
 removeMean = true;      % 去直流
@@ -56,23 +56,21 @@ conj_prod = conj(rx_base) .* rx_delayed;
 % 注意：x(1:end-D) 的长度为 L-D
 P_metric = filter(ones(1, W), 1, conj_prod);
 
-% 3. 能量计算
-% 计算窗口内的能量用于归一化
+% 3. 能量计算 (修改为双边能量归一化)
+% 标准 Schmidl & Cox 归一化: P_metric ./ sqrt(R_base * R_delayed)
+% 其中 R_base 是窗口 [n, n+W-1] 内的能量
+% R_delayed 是窗口 [n+D, n+D+W-1] 内的能量
+
 rx_power = abs(rx_base).^2;
-R_energy = filter(ones(1, W), 1, rx_power);
+R_base = filter(ones(1, W), 1, rx_power);
 
-% 4. 计算最终度量 M(n)
-% 修改说明：
-% 根据 PSS 结构，Block0 是反相的 (-B)，Block1 是 B。
-% 1. 在 Block0 和 Block1 交界处，rx_base 对应 Block0(-B)，rx_delayed 对应 Block1(B)。
-%    此时 conj_prod = (-B)* . B = -|B|^2，求和也是负实数。
-%    Real(P_metric) 应该出现显著负峰值。
-% 2. 在 Block1 和 Block2 交界处，rx_base 对应 Block1(B)，rx_delayed 对应 Block2(B)。
-%    Real(P_metric) 应该出现显著正峰值。
-% 因此我们保留 P_metric 的实部（归一化后），这样可以看到正负极性。
+% 计算延迟窗口的能量 (对应公式中的 R_D)
+rx_power_delayed = abs(rx_delayed).^2;
+R_delayed = filter(ones(1, W), 1, rx_power_delayed);
 
-% 仅归一化 P_metric (保留复数信息，稍后取实部)
-M_complex = P_metric ./ (R_energy + 1e-10);
+% 4. 计算最终度量 M(n) (使用双边标准归一化)
+% 分母为 sqrt(R_base * R_delayed)
+M_complex = P_metric ./ (sqrt(R_base .* R_delayed) + 1e-10);
 
 % 取实部作为特征曲线 (理论上 PSS 区域相位为 0 或 pi，即全是实数)
 M_real = real(M_complex);

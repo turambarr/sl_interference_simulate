@@ -4,11 +4,11 @@
 clear; clc;
 
 %% 参数区（按需修改）
-inFile = 'sigtest1.iq';
+inFile = '20250912222305_part1.iq';
 Fs = 409.6e6;      % 采样率 Hz
 
 startSample = 0;   % 从第几个“复采样点”开始（0-based）
-Nplot = 20000000;    % 绘图点数（复采样点数）
+Nplot = 10000000;    % 绘图点数（复采样点数）
 
 % ===== 时域“突起(burst)”检测（可选） =====
 enableBurstDetect = true;
