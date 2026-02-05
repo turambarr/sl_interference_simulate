@@ -10,8 +10,8 @@ inFile = 'sigtest1.iq';
 
 % 设置要观察的样本区间 (0-based index)
 % 例如：只想看刚才检测到的那个 "protrusion" 区域
-regionStart = 14475+181; 
-regionEnd   = 14475+181+874; 
+regionStart = 14475; 
+regionEnd   = 14475+6992; 
 
 normalizeToUnit = true; % 根据文件格式一般选 true (int16 -> float[-1,1])
 removeMean = false;      % 去除直流分量
@@ -21,7 +21,7 @@ enableResample = true;  % 开关：是否启用降采样
 % 比例因子遍历：从 minPts 到 maxPts
 % 你的 intent: int a=100; int b=6992; for i=0:1:b-a ...
 % MATLAB 翻译: 遍历目标点数，每次增加一定步长 (例如 250)
-% 这样大约 6900/250 = 27 张图，分成 3 页显示 (10张/页)
+
 % startPts = 2186;
 startPts = 2186;
 % endPts = 6992;
@@ -121,7 +121,7 @@ for p = 1:numPages
         tLen = targetLengthList(k); % 修正：定义 tLen
 
         % 增加调试信息以回答您的疑问
-        % fprintf('[Debug] k=%d, tLen (Target)=%d, srcLen (Source)=%d\n', k, round(tLen), srcLen);
+        fprintf('[Debug] k=%d, tLen (Target)=%d, srcLen (Source)=%d\n', k, round(tLen), srcLen);
         
         % 执行降采样
         if tLen >= srcLen
@@ -164,10 +164,8 @@ for p = 1:numPages
         % 红色=奇数索引点, 蓝色=偶数索引点
         % 如果是 2 倍过采样，红蓝点群通常会分离
         idx_odd = 1:2:length(x_curr);
- 
-
         idx_even = 2:2:length(x_curr);
-     
+        
         plot(real(x_curr(idx_odd)), imag(x_curr(idx_odd)), 'r.', 'MarkerSize', 8, 'DisplayName', 'Odd');
         hold on;
         plot(real(x_curr(idx_even)), imag(x_curr(idx_even)), 'b.', 'MarkerSize', 8, 'DisplayName', 'Even');
