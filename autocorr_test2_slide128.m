@@ -5,7 +5,7 @@
 clear; clc;
 
 %% 参数区（按需修改）
-inFile = 'sigtest1.iq';
+inFile = 'sigtest8.iq';
 
 startSample0 = 0;   % 0-based
 numSamples = 50000;    % [] 表示读到文件尾（如果文件很大，建议改成一个有限值）
