@@ -8,12 +8,12 @@ clear; clc;
 %% === 参数设置区域 ===
 
 % --- 信号 1 (参考信号/模板) ---
-file1 = 'sigtest1.iq';     % 文件名
-start1 = 15514;                % 起始点（0-based）
-len1   = 874;             % 长度 (例如选一个特定Burst或PSS长度)
+file1 = 'sigtest8.iq';     % 文件名
+start1 = 19934-874*5;                % 起始点（0-based）
+len1   = 162;             % 长度 (例如选一个特定Burst或PSS长度)
 
 % --- 信号 2 (待检测信号/长序列) ---
-file2 = 'sigtest144.iq';     % 文件名
+file2 = 'sigtest8.iq';     % 文件名
 start2 = 0;                % 起始点（0-based）
 len2   = 30000;             % 长度
 

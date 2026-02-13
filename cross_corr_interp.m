@@ -13,10 +13,14 @@ start1 = 15530-874+10; % 参考 constellation_interp 中的位置
 % 如果原来的模板长度是 874, 降采样 D=6.4, 则大约剩下 136 个符号
 len1_raw   = 874;     
 
-% --- 信号 2 (搜索区域) ---
+% --- 搜索区域 ---
 file2 = 'sigtest26.iq';
 start2 = 0;
 len2_raw   = 30000;    % 搜索范围
+
+% --- 频率校正参数 ---
+fs = 409.6e6;          % 采样率 409.6 MHz
+f_offset = 1000;       % 假设频偏 1kHz (将执行去频偏: s * exp(-j*2*pi*f_off*t))
 
 % --- 降采样参数 ---
 D = 6.398;            % 降采样倍率 (请使用 optimize_D_kmeans 算出的最佳值)
@@ -32,6 +36,18 @@ fprintf('正在读取信号 2: %s (Start=%d, Len=%d)...\n', file2, start2, len2_
 [s2_raw, ~] = iq_read_int16_le(file2, start2, len2_raw);
 s2_raw = double(s2_raw);
 s2_raw = s2_raw - mean(s2_raw);
+
+%% === 2.1 去除频偏 (修正 Search Signal) ===
+if f_offset ~= 0
+    fprintf('对信号 2 执行去频偏 (Offset=%.1f Hz)...\n', f_offset);
+    % 构造时间向量 (确保列向量)
+    if isrow(s2_raw), s2_raw = s2_raw(:); end
+    t_vec2 = (0 : length(s2_raw)-1)' / fs;
+    % e^(-jwt)
+    s2_raw = s2_raw .* exp(-1i * 2 * pi * f_offset * t_vec2);
+    % 恢复为行向量 (以便后续 interp1 保持一致，虽然 interp1 接受列向量但 best practice 是保持原维度)
+    s2_raw = s2_raw.'; 
+end
 
 %% === 3. 插值降采样 (Interp1) ===
 fprintf('执行插值降采样 (D=%.4f)...\n', D);
