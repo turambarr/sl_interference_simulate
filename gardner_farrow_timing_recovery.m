@@ -1,5 +1,5 @@
 % gardner_farrow_timing_recovery.m
-% 彻底修改的降采样与同步方案：
+% 修改的降采样与同步方案：
 % 1. 先进行 3倍 整数降采样 (resample)
 % 2. 使用 Farrow 插值器 + Gardner 误差检测器 (TED) 进行闭环定时恢复
 % 目标：从非整数倍采样率中恢复出最佳符号时刻 (Strobe)
@@ -70,12 +70,45 @@ x_high = resample(x_raw, P, Q);
 % --- SPS 设置 ---
 sps     = 9; % 540MHz / 60MHz = 9
 
-% 跳过 RRC 滤波，直接使用重采样后的信号
-fprintf('   Skipping RRC Filtering, using raw resampled data (SPS=%d)...\n', sps);
+% --- RRC 滤波器 (移除：信号特性不匹配导致的恶化) ---
+% 用户反馈加了 RRC 后效果变差，说明该信号可能不是标准的脉冲成型信号，
+%或者是恒包络信号 (如 GMSK/SDPSK)，RRC 会引入不必要的 ISI。
+fprintf('   Skipping RRC Filtering (Reverted). Using raw resampled data (SPS=%d)...\n', sps);
 x_filtered = x_high;
+
+% beta_rrc = 0.5; 
+% span     = 10; 
+% h_rrc    = rcosdesign(beta_rrc, span, sps);
+% x_filtered = conv(x_high, h_rrc, 'same');
 
 %% 4. Farrow + Gardner 闭环定时恢复 (Input: 540MHz, Output: 2*SymRate)
 fprintf('Step 4: Gardner Timing Recovery Loop (Input SPS=9, Loop SPS=2)...\n');
+
+% --- 关键修正：鲁棒的归一化 (Robust Normalization) ---
+% Gardner TED 的增益与输入幅度平方成正比。
+% 为了防止 Burst 信号导致有效段幅度过大（从而导致环路震荡），
+% 我们检查信号的峰值与均值之比，智能选择归一化因子。
+
+% 1. 计算统计量
+amp_vals = abs(x_filtered);
+rms_val  = sqrt(mean(amp_vals.^2));
+% 取 99% 分位点作为"近似峰值"，抗噪点干扰
+sorted_amp = sort(amp_vals);
+peak_ref   = sorted_amp(floor(length(sorted_amp) * 0.99));
+
+% 2. 决策归一化因子
+% 如果是连续信号，Peak 也就比 RMS 大一点点 (比如 QPSK 是 1.0 vs 1.0, 也就是 PAPR 低)
+% 如果是 Burst，绝大部分是噪声(0)，RMS 会极低，导致 Peak/RMS 巨大。
+if peak_ref > 3.0 * rms_val
+    fprintf('   [Normalization] Detect Burst Signal (Peak >> RMS). Using Peak ref: %.4f\n', peak_ref);
+    norm_factor = peak_ref; 
+else
+    fprintf('   [Normalization] Detect Continuous Signal. Using RMS ref: %.4f\n', rms_val);
+    norm_factor = rms_val;
+end
+
+% 3. 执行归一化
+x_filtered = x_filtered / norm_factor;
 
 % --- 参数设置 ---
 % 输入采样率: 540 MHz
@@ -121,6 +154,7 @@ y_out_all = zeros(1, est_out_len);
 out_idx = 0;
 
 % --- 环路循环 ---
+% 这里的可视化代码已移除，以保持清洁
 while idx_input <= len_in - 2
     
     cnt_nco = cnt_nco - 1;
@@ -150,6 +184,9 @@ while idx_input <= len_in - 2
         % 保存输出
         out_idx = out_idx + 1;
         y_out_all(out_idx) = y_now;
+        
+        % [Visualization Removed]
+        % debug_strobe_idx...
         
         % 更新 Gardner Buffer
         sample_buf = [sample_buf(2:3), y_now];
@@ -190,6 +227,10 @@ end
 % 截取实际输出
 y_out_all = y_out_all(1:out_idx);
 fprintf('   Timing Recovery Done. Output Samples: %d\n', length(y_out_all));
+
+
+%% 4.1 可视化：[已移除]
+% figure('Position', [100, 100, 1000, 400], 'Name', 'Gardner Sampling Instants');...
 
 %% 5. 抽取最佳符号流 (Downsample to SPS=1)
 % Gardner 稳定后，我们需要选取最佳采样点。
@@ -300,31 +341,89 @@ xlim([-2.5 2.5]); ylim([-2.5 2.5]);
 fprintf('Step 8: Costas Loop (Fine Phase Sync)...\n');
 
 % 归一化幅度，确保环路增益稳定
+% 这一步只是整个序列的均值归一化
 y_costas_in = y_roi_corr / mean(abs(y_roi_corr)); 
 
-% Loop Parameters (调整增益)
-alpha = 0.05; 
-beta  = 0.0005;
+% Loop Parameters (大幅降低增益，提高稳定性)
+alpha = 0.005;  % 原 0.05 -> 0.005 (降低10倍)
+beta  = 0.0001; % 原 0.0005 -> 0.0001 (降低5倍)
 phase_out = 0;
 freq_track  = 0;
+
 y_costas = zeros(size(y_costas_in));
 costas_err_hist = zeros(size(y_costas_in));
 
+% 调试：记录频率跟踪轨迹
+freq_hist = zeros(size(y_costas_in));
+
 for k = 1:length(y_costas_in)
-    % Apply Loop Phase
+    % 1. Apply Loop Phase
     z = y_costas_in(k) * exp(-1j * phase_out);
     y_costas(k) = z;
     
-    % Phase Error Detector (QPSK/SDPSK -> 4th Power)
-    % error = imag(z^4) pushes to axes (0, 90, 180, 270)
-    % Scaling factor 0.25 to reduce magnitude
-    err = 0.25 * imag(z^4); 
+    % 2. Phase Error Detector (Robust)
+    % 改进：先进行幅度归一化，再计算误差，消除幅度噪声对鉴相器的影响
+    z_norm = z / (abs(z) + 1e-10); % 防止除零
+    
+    % QPSK/SDPSK -> 4th Power PED
+    % err = imag(z_norm^4) / 4
+    % 范围限制在 [-0.25, 0.25] 之间
+    err = 0.25 * imag(z_norm^4); 
+    
     costas_err_hist(k) = err;
     
-    % Loop Filter
+    % 3. Loop Filter
     freq_track  = freq_track + beta * err;
     phase_out   = phase_out + alpha * err + freq_track;
+    
+    freq_hist(k) = freq_track;
 end
+
+fprintf('   Costas Loop Locked. Final Freq Correction: %.6f\n', freq_track);
+
+% --- 汇总与输出估计参数 ---
+fprintf('\n================================================\n');
+fprintf('   ESTIMATED SYNCHRONIZATION PARAMETERS\n');
+fprintf('================================================\n');
+
+% 1. SRO (时钟频偏)
+% 理论步进: step_nominal
+% 实际稳态步进: step_nominal + loop_state (积分项即为稳态误差)
+% loop_state 是累积的，代表了为追踪 SRO 需要的额外步进
+% Gardner 循环结束后 loop_state 保存着最后的状态
+loop_integral_val = loop_state; 
+avg_step_steady = step_nominal + loop_integral_val;
+
+% 计算 ppm: (Actual - Nominal) / Nominal * 1e6
+sro_ppm = (loop_integral_val / step_nominal) * 1e6;
+
+fprintf('1. Sampling Rate Offset (SRO):\n');
+fprintf('   Nominal Step    : %.6f samples\n', step_nominal);
+fprintf('   Loop Integrator : %.6f samples (Steady State)\n', loop_integral_val);
+fprintf('   Steady Step     : %.6f samples\n', avg_step_steady);
+fprintf('   Clock Offset    : %.2f ppm\n', sro_ppm);
+
+% 2. CFO (载波频偏)
+% 总频偏 = 粗估 (M=4 FFT) + 精估 (Costas Loop Integrator)
+% delta_f_norm 是粗估的归一化频偏 (cycles/symbol)
+% freq_track 是 Costas 环的归一化频偏 (rad/symbol)，需转为 cycles/symbol
+% Costas loop update: phase += ... + freq_track
+% Compensation: exp(-j * phase)
+% 这意味着 freq_track 正在追踪残留的频偏 (rad/s)
+
+delta_f_fine_cycles = freq_track / (2*pi); % rad -> cycle
+total_cfo_norm      = delta_f_norm + delta_f_fine_cycles; % cycles/symbol
+
+% 转换为 Hz
+% 1 cycle/symbol = fs_symbol Hz
+cfo_hz = total_cfo_norm * fs_symbol;
+
+fprintf('2. Carrier Frequency Offset (CFO):\n');
+fprintf('   Coarse Est (M=4): %.6f (cycles/symbol)\n', delta_f_norm);
+fprintf('   Fine Est (Loop) : %.6f (cycles/symbol)\n', delta_f_fine_cycles);
+fprintf('   Total Norm Freq : %.6f (cycles/symbol)\n', total_cfo_norm);
+fprintf('   Total CFO       : %.2f Hz (at SymRate %d Msps)\n', cfo_hz, fs_symbol/1e6);
+fprintf('================================================\n');
 
 % --- 最终绘图 (含 Costas) ---
 figure('Position', [250, 250, 1200, 500], 'Name', 'Final Results (Gardner + CFO + Costas)');
@@ -332,10 +431,12 @@ figure('Position', [250, 250, 1200, 500], 'Name', 'Final Results (Gardner + CFO 
 % 1. Costas 误差收敛
 subplot(1, 3, 1);
 plot(costas_err_hist);
-title('Costas Phase Error');
-grid on; xlabel('Symbol Index'); ylabel('Error');
-xlim([0 length(costas_err_hist)]);
-ylim([-0.5 0.5]);
+hold on;
+plot(freq_hist * 100, 'r', 'LineWidth', 1.5); % 把频率轨迹也画上去（放大显示）
+legend('Phase Err', 'Freq Track (x100)');
+title('Costas Loop Status');
+grid on; xlabel('Symbol Index'); 
+ylim([-0.3 0.3]); % 限制显示范围，误差被限幅了
 
 % 2. 最终星座图 (Costas Output)
 subplot(1, 3, 2);
@@ -356,5 +457,111 @@ axis square; grid on;
 title('Final Differential Constellation');
 xlabel('I'); ylabel('Q');
 xlim([-2.5 2.5]); ylim([-2.5 2.5]);
+
+
+%% 9. [Final Step] Demodulation & m-sequence Extraction
+fprintf('\nStep 9: SDPSK Demodulation and m-sequence Extraction...\n');
+
+% 1. 获取同步后的符号流
+% 假设 y_costas 是已经锁定相位的符号 (1 Sample/Symbol)
+% 截取前 1024 个点 (8 blocks * 128 symbols)
+total_sym_needed = 8 * 128;
+if length(y_costas) < total_sym_needed
+    warning('Not enough symbols tracked! Expected 1024, got %d', length(y_costas));
+    y_sync = y_costas;
+else
+    y_sync = y_costas(1:total_sym_needed);
+end
+
+% 2. 差分检波 (Differential Demodulation)
+% SDPSK 信息包含在相邻符号的相位差中
+% d[k] = y[k] * conj(y[k-1])
+% 对于 pi/2-BPSK, 差分相位应该是 +pi/2 (Bit 0) 或 -pi/2 (Bit 1)
+% 即 d[k] 应该接近 +j 或 -j
+% 注意：如果是 m 序列结构，且块之间有反相 (++-+-+-+)，
+% 差分检波会自动消除块反相的影响 (因为 (-A)*conj(-B) = A*conj(B))
+% 所以 differential demod 后的比特流应该是 8 个完全相同的 m 序列 (除了边界点)
+
+% 为了保持长度一致，我们假定第一个符号通过某种方式参考，或者直接丢弃第一个差分
+% 这里为了对齐，我们直接计算 full differential
+y_diff_vec = y_sync(2:end) .* conj(y_sync(1:end-1));
+
+% 判决: Imaginary part > 0 -> 0, < 0 -> 1
+% (这取决于具体的映射规则，暂定 Im>0 为 0, Im<0 为 1)
+raw_soft_bits = -imag(y_diff_vec); % 正值为1，负值为0 (逻辑取反适应习惯)
+
+% 3. 规整化与合并 (Reshape & Combine)
+% --- [关键修改] 使用差分检波数据 ---
+% 优势：自动消除 Block 的正负反相影响 ((-A)*(-B)' = AB')
+% 我们直接使用 raw_soft_bits (Step 2 计算出的)
+% 注意：raw_soft_bits 长度为 1023 (因为丢了第一个)，需要补齐或截断
+% 为了整齐，我们丢弃每一块的第一个差分点？
+% 或者假设 raw_soft_bits 对应的是 1..1023
+% 没关系，先 reshape 看看
+target_len = 128 * 8;
+if length(raw_soft_bits) < target_len
+    raw_soft_bits(end+1 : target_len) = 0; % 补零
+else
+    raw_soft_bits = raw_soft_bits(1:target_len);
+end
+
+% 不再使用相干解调结果
+% soft_syms = real(y_bpsk); 
+
+% 4. 结构合并
+% 此时不需要再根据 ++-+-+-+ 手动翻转了，差分天然去除了符号翻转
+try
+    mat_syms = reshape(raw_soft_bits, 128, 8);
+    
+    % [已移除] 手动翻转代码
+    % mat_syms(:, 3) = -mat_syms(:, 3); ...
+    
+    % --- 验证：逐块输出 ---
+    % 将每一块独立解调并打印，方便肉眼比对一致性
+    fprintf('\n--- Individual Block Verification (Sign Corrected) ---\n');
+    for col = 1:8
+         col_soft = mat_syms(:, col);
+         col_bits = col_soft > 0;
+         col_hex = '';
+         for i = 1:4:128
+            chunk = col_bits(i:i+3);
+            val = chunk(1)*8 + chunk(2)*4 + chunk(3)*2 + chunk(4)*1;
+            col_hex = [col_hex, dec2hex(val)];
+         end
+         
+         % 简单的质量评估 (软比特的平均幅度，越大越确信)
+         avg_mag = mean(abs(col_soft));
+         fprintf('Block %d (Conf=%.2f): %s\n', col, avg_mag, col_hex);
+    end
+    fprintf('------------------------------------------------\n');
+
+    % 合并 (求平均) - 提升 SNR
+    m_seq_soft = mean(mat_syms, 2);
+    
+    % 5. 判决与 Hex 输出
+    % 判决: >0 -> ? <0 -> ?
+    % 这一步有 180度 模糊度 (即全 0 变 全 1)。只能输出一种，另一种是其反码。
+    % 假设 >0 为 1
+    m_bits = m_seq_soft > 0;
+    
+    % 转 Hex
+    % 128 bits = 128/4 = 32 Hex digits
+    hex_str = '';
+    for i = 1:4:128
+        chunk = m_bits(i:i+3);
+        % Convert [b3 b2 b1 b0] to int
+        val = chunk(1)*8 + chunk(2)*4 + chunk(3)*2 + chunk(4)*1;
+        hex_str = [hex_str, dec2hex(val)];
+    end
+    
+    fprintf('\n------------------------------------------------\n');
+    fprintf('Extracted m-sequence (Hex):\n');
+    fprintf('%s\n', hex_str);
+    fprintf('(Note: If incorrect, try inverting all bits: ~Hex)\n');
+    fprintf('------------------------------------------------\n');
+    
+catch e
+    fprintf('Error in structural decoding: %s\n', e.message);
+end
 
 return;

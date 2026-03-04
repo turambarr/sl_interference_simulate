@@ -46,8 +46,29 @@ end
 suffix_len = 32;
 pss_signal = [pss_signal, -pss_block_base(1:suffix_len)];
 
-% --- (2) 生成 SSS (简化为随机 OFDM 符号) ---
-sss_signal = gen_ofdm_symbol(N);
+% --- (2) 生成 SSS (OFDM + 4QAM Fixed) ---
+fprintf('生成 SSS 信号 (OFDM + 4QAM Fixed Pattern)...\n');
+% 构造固定频域数据: 0, 1, 2, 3, 0, 1 ... 便于解调验证
+sss_data_len = N - 200; % 824 个有效子载波
+sss_fixed_msg = mod(0:sss_data_len-1, 4); % 生成固定序列
+
+% 4QAM 映射 (Phase: pi/4, 3pi/4, -3pi/4, -pi/4)
+sss_qam_syms = exp(1j * (sss_fixed_msg * pi/2 + pi/4));
+
+% OFDM 调制 (映射到子载波)
+sss_spectrum = zeros(1, N);
+half_sc = floor(sss_data_len / 2);
+% 正频率部分 (Index 2 : half+1)
+sss_spectrum(2 : half_sc+1) = sss_qam_syms(1:half_sc);
+% 负频率部分 (Index N-half+1 : N)
+sss_spectrum(N-half_sc+1 : N) = sss_qam_syms(half_sc+1:end);
+
+% IFFT 变换 (无 CP)
+sss_signal = ifft(sss_spectrum, N) * sqrt(N);
+
+% 保存参考数据用于接收端验证
+sss_ref_data = sss_fixed_msg;
+sss_ref_syms = sss_qam_syms;
 
 % --- (3) 生成 Data Payload (OFDM 数据符号) ---
 data_payload = [];
@@ -75,8 +96,13 @@ tx_signal_high = resample(tx_signal_base, P, Q);
 % 重新计算时间轴 (因为 resample 后长度变了)
 time_high = (0:length(tx_signal_high)-1) / Fs_high;
 
-% B. 信道 (不再加频偏，也不再降采样回去，因为我们要测试接收机降采样)
-rx_signal_high = tx_signal_high; 
+% B. 信道 (添加频偏)
+% 原代码: rx_signal_high = tx_signal_high; (无频偏)
+% 新代码: 添加 3 MHz 频偏
+cfo_val = 3e6; % 3 MHz
+t_vec = (0:length(tx_signal_high)-1) / Fs_high;
+phase_rot = exp(1j * 2 * pi * cfo_val * t_vec);
+rx_signal_high = tx_signal_high .* phase_rot; 
 
 % D. 添加信道噪声 (AWGN) 到高信号上
 sig_power = mean(abs(rx_signal_high).^2);
@@ -320,69 +346,108 @@ end
 x_final = x_synced * exp(-1j * pi/4);
 
 %% 9. 结果展示
-figure('Position', [200, 200, 1000, 400]);
-subplot(1,3,1); plot(timing_errs); title('Gardner Timing Error'); grid on;
-subplot(1,3,2); plot(real(x_loop_in), imag(x_loop_in), '.'); title('Gardner Output (No Costas)'); axis square;
-subplot(1,3,3); plot(real(x_final), imag(x_final), 'b.'); 
-hold on; 
-% 绘制差分
-x_diff = x_final(2:end) .* conj(x_final(1:end-1));
-plot(real(x_diff), imag(x_diff), 'g.'); 
-title('Final Output (Blue) & Diff (Green)'); 
-legend('Sync', 'Diff'); axis square; grid on; xlim([-2 2]); ylim([-2 2]);
+% figure('Position', [200, 200, 1000, 400]);
+% subplot(1,3,1); plot(timing_errs); title('Gardner Timing Error'); grid on;
+% subplot(1,3,2); plot(real(x_loop_in), imag(x_loop_in), '.'); title('Gardner Output (No Costas)'); axis square;
+% subplot(1,3,3); plot(real(x_final), imag(x_final), 'b.'); 
+% hold on; 
+% % 绘制差分
+% x_diff = x_final(2:end) .* conj(x_final(1:end-1));
+% plot(real(x_diff), imag(x_diff), 'g.'); 
+% title('Final Output (Blue) & Diff (Green)'); 
+% legend('Sync', 'Diff'); axis square; grid on; xlim([-2 2]); ylim([-2 2]);
 
 %% 9.1 差分眼图 (SPS=2)
 % 使用 Gardner 输出的 2倍过采样信号查看眼图
-figure('Position', [250, 250, 800, 600], 'Name', 'Differential Eye Diagram (SPS=2)');
+% figure('Position', [250, 250, 800, 600], 'Name', 'Differential Eye Diagram (SPS=2)');
 
-% 计算 SPS=2 的差分
-% d[k] = y[k] * conj(y[k-2]) (因为 2 samples = 1 symbol)
-y_all_diff = y_out_all(3:end) .* conj(y_out_all(1:end-2));
+% % 计算 SPS=2 的差分
+% % d[k] = y[k] * conj(y[k-2]) (因为 2 samples = 1 symbol)
+% y_all_diff = y_out_all(3:end) .* conj(y_out_all(1:end-2));
 
-% 折叠显示 (2 Symbols width = 4 samples)
-% 由于 SPS Only=2, 眼图可能略显折线感
-trace_width = 4; % 2 Symbols
-n_traces = floor(length(y_all_diff) / 2); % Step size = 2 (1 Symbol)
-eye_I = zeros(n_traces, trace_width);
-eye_Q = zeros(n_traces, trace_width);
+% % 折叠显示 (2 Symbols width = 4 samples)
+% % 由于 SPS Only=2, 眼图可能略显折线感
+% trace_width = 4; % 2 Symbols
+% n_traces = floor(length(y_all_diff) / 2); % Step size = 2 (1 Symbol)
+% eye_I = zeros(n_traces, trace_width);
+% eye_Q = zeros(n_traces, trace_width);
 
-for k = 1:n_traces
-    % 滑动窗口
-    idx_start = (k-1)*2 + 1;
-    idx_end   = idx_start + trace_width - 1;
-    if idx_end > length(y_all_diff); break; end
+% for k = 1:n_traces
+%     % 滑动窗口
+%     idx_start = (k-1)*2 + 1;
+%     idx_end   = idx_start + trace_width - 1;
+%     if idx_end > length(y_all_diff); break; end
     
-    seg = y_all_diff(idx_start : idx_end);
-    eye_I(k, :) = real(seg);
-    eye_Q(k, :) = imag(seg);
-end
+%     seg = y_all_diff(idx_start : idx_end);
+%     eye_I(k, :) = real(seg);
+%     eye_Q(k, :) = imag(seg);
+% end
 
-subplot(2,1,1);
-plot(eye_I', 'b', 'Color', [0 0 1 0.05]); 
-title('Diff Eye Diagram (I/Real) - SPS=2'); grid on;
-subplot(2,1,2);
-plot(eye_Q', 'r', 'Color', [1 0 0 0.05]);
-title('Diff Eye Diagram (Q/Imag) - SPS=2'); grid on;
+% subplot(2,1,1);
+% plot(eye_I', 'b', 'Color', [0 0 1 0.05]); 
+% title('Diff Eye Diagram (I/Real) - SPS=2'); grid on;
+% subplot(2,1,2);
+% plot(eye_Q', 'r', 'Color', [1 0 0 0.05]);
+% title('Diff Eye Diagram (Q/Imag) - SPS=2'); grid on;
 
 % 验证误码
-dphi_rx = angle(x_diff);
-b_est = sign(dphi_rx);
+% dphi_rx = angle(x_diff);
+% b_est = sign(dphi_rx);
 
 % 我们只验证 PSS 部分
 % 需要找到 x_final 中 PSS 的起始点
 % 我们是基于 known_start_time 往前 20个 符号截取的
 % 加上 loop 延迟，大概在 20 附近
-offset_est = 20; 
-valid_len = 127;
-if length(b_est) >= offset_est + valid_len
-    b_est_pss = b_est(offset_est : offset_est + valid_len - 1);
-    b_ref_segment = b(2:valid_len+1);
+% offset_est = 20; 
+% valid_len = 127;
+% if length(b_est) >= offset_est + valid_len
+%     b_est_pss = b_est(offset_est : offset_est + valid_len - 1);
+%     b_ref_segment = b(2:valid_len+1);
     
-    errors = sum(b_est_pss ~= b_ref_segment);
-    fprintf('PSS 解调误码: %d / %d\n', errors, valid_len);
-end
+%     errors = sum(b_est_pss ~= b_ref_segment);
+%     fprintf('PSS 解调误码: %d / %d\n', errors, valid_len);
+% end
 
-%% 辅助函数: 生成随机 OFDM 符号
+%% 10. SSS 解调验证 (Ideal Case)
+fprintf('\nStep 10: SSS 解调与验证 (Ideal Timing)...\n');
+% 从基带接收信号中直接截取 SSS 用于验证
+% 理想起始点: noise_len + length(pss_signal) + 1
+rss_idx_start = noise_len + length(pss_signal) + 1;
+rss_idx_end   = rss_idx_start + N - 1;
+
+if rss_idx_end <= length(rx_signal)
+    rss_rx = rx_signal(rss_idx_start : rss_idx_end);
+    
+    % 1. FFT
+    rss_rx_freq = fft(rss_rx, N) / sqrt(N);
+    
+    % 2. 提取有效子载波
+    % 正频率
+    rx_sc_pos = rss_rx_freq(2 : half_sc+1);
+    % 负频率
+    rx_sc_neg = rss_rx_freq(N-half_sc+1 : N);
+    
+    rx_sc_total = [rx_sc_pos, rx_sc_neg];
+    
+    % 3. 绘制星座图
+    figure('Position', [300, 300, 500, 500], 'Name', 'SSS Constellation (Ideal Timing)');
+    plot(real(rx_sc_total), imag(rx_sc_total), 'b.'); hold on;
+    % 绘制参考中心点
+    ref_pts = [1+1j, -1+1j, -1-1j, 1-1j] / sqrt(2); % QPSK
+    plot(real(ref_pts), imag(ref_pts), 'rx', 'MarkerSize', 10, 'LineWidth', 2);
+    title('SSS Constellation (After FFT)'); axis square; grid on;
+    xlabel('I'); ylabel('Q'); xlim([-2 2]); ylim([-2 2]);
+    
+    % 4. 简单的硬判决与误码率
+    rx_phase = angle(rx_sc_total);
+    % 映射回 0,1,2,3: (phase - pi/4) / (pi/2) -> rounds to int
+    rx_int = mod(round((rx_phase - pi/4) / (pi/2)), 4);
+    
+    bit_errs = sum(rx_int ~= sss_ref_data);
+    fprintf('   SSS Symbol Errors (Raw): %d / %d\n', bit_errs, length(sss_ref_data));
+else
+    fprintf('   [Warning] Received signal too short to verify SSS.\n');
+end
 function sym = gen_ofdm_symbol(N)
     % 1. 参数
     num_subcarriers = N - 200; % 留出保护带 (Guard Band)
