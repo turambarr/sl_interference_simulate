@@ -5,7 +5,7 @@ N = 1024;               % 符号长度 (FFT Size)
 %% oversample_K = 4;    % (已移除：不再通过固定倍数推算)
 Fs_high = 409.6e6;      % 高采样率 (Hz)
 Fs_base = 60e6;         % 基带采样率 (带宽设置为 60MHz)
-freq_offset = 1000;     % 频偏 (Hz)
+freq_offset = 3e6;      % 频偏设为 3 MHz 进行测试
 
 L_block = 128;          % PSS 分块长度 (N/8)
 SNR_dB = 10;            % 信噪比
@@ -46,11 +46,15 @@ end
 suffix_len = 32;
 pss_signal = [pss_signal, -pss_block_base(1:suffix_len)];
 
-% --- (2) 生成 SSS (OFDM + 4QAM Fixed) ---
-fprintf('生成 SSS 信号 (OFDM + 4QAM Fixed Pattern)...\n');
-% 构造固定频域数据: 0, 1, 2, 3, 0, 1 ... 便于解调验证
+% --- (2) 生成 SSS (OFDM + 4QAM PN Sequence) ---
+fprintf('生成 SSS 信号 (OFDM + 4QAM PN Sequence)...\n');
+% 更改为固定的伪随机扰码序列 (PN Sequence)，打乱频域相位，模拟真实的复杂多径与 OFDM 峰均比
 sss_data_len = N - 200; % 824 个有效子载波
-sss_fixed_msg = mod(0:sss_data_len-1, 4); % 生成固定序列
+
+% 使用固定的随机种子，保证每次生成的"凌乱"序列完全一致，便于控制变量找 Bug
+rng(42); 
+sss_fixed_msg = randi([0 3], 1, sss_data_len); % 固定的 0~3 随机交织序列
+rng('shuffle'); % 恢复随机状态，以免影响后方AWGN噪声生成
 
 % 4QAM 映射 (Phase: pi/4, 3pi/4, -3pi/4, -pi/4)
 sss_qam_syms = exp(1j * (sss_fixed_msg * pi/2 + pi/4));
@@ -96,10 +100,8 @@ tx_signal_high = resample(tx_signal_base, P, Q);
 % 重新计算时间轴 (因为 resample 后长度变了)
 time_high = (0:length(tx_signal_high)-1) / Fs_high;
 
-% B. 信道 (添加频偏)
-% 原代码: rx_signal_high = tx_signal_high; (无频偏)
-% 新代码: 添加 3 MHz 频偏
-cfo_val = 3e6; % 3 MHz
+% B. 信道 (添加由于测试设定的测试频偏)
+cfo_val = freq_offset; % 应用上方统一配置的 3MHz 频偏
 t_vec = (0:length(tx_signal_high)-1) / Fs_high;
 phase_rot = exp(1j * 2 * pi * cfo_val * t_vec);
 rx_signal_high = tx_signal_high .* phase_rot; 
@@ -410,41 +412,46 @@ x_final = x_synced * exp(-1j * pi/4);
 
 %% 10. SSS 解调验证 (Ideal Case)
 fprintf('\nStep 10: SSS 解调与验证 (Ideal Timing)...\n');
+% 独立指定接收端解调的 FFT 点数
+N_rx_fft = 1024; 
+
 % 从基带接收信号中直接截取 SSS 用于验证
 % 理想起始点: noise_len + length(pss_signal) + 1
 rss_idx_start = noise_len + length(pss_signal) + 1;
-rss_idx_end   = rss_idx_start + N - 1;
+rss_idx_end   = rss_idx_start + N_rx_fft - 1;
 
 if rss_idx_end <= length(rx_signal)
     rss_rx = rx_signal(rss_idx_start : rss_idx_end);
     
     % 1. FFT
-    rss_rx_freq = fft(rss_rx, N) / sqrt(N);
+    rss_rx_freq = fft(rss_rx, N_rx_fft) / sqrt(N_rx_fft);
     
     % 2. 提取有效子载波
-    % 正频率
-    rx_sc_pos = rss_rx_freq(2 : half_sc+1);
-    % 负频率
-    rx_sc_neg = rss_rx_freq(N-half_sc+1 : N);
+    % 因为解调点数 N_rx_fft 变了，索引也需要按比例或者特定规则调整
+    % 这里我们简单地取其按比例对应的前半段和后半段作为演示
+    rx_sc_pos = rss_rx_freq(2 : floor(N_rx_fft/2));
+    rx_sc_neg = rss_rx_freq(ceil(N_rx_fft/2)+1 : N_rx_fft);
     
     rx_sc_total = [rx_sc_pos, rx_sc_neg];
     
     % 3. 绘制星座图
-    figure('Position', [300, 300, 500, 500], 'Name', 'SSS Constellation (Ideal Timing)');
+    figure('Position', [300, 300, 500, 500], 'Name', sprintf('SSS Constellation (N=%d, CFO=%.1fMHz Uncompensated)', N_rx_fft, freq_offset/1e6));
     plot(real(rx_sc_total), imag(rx_sc_total), 'b.'); hold on;
     % 绘制参考中心点
     ref_pts = [1+1j, -1+1j, -1-1j, 1-1j] / sqrt(2); % QPSK
     plot(real(ref_pts), imag(ref_pts), 'rx', 'MarkerSize', 10, 'LineWidth', 2);
-    title('SSS Constellation (After FFT)'); axis square; grid on;
+    title(sprintf('SSS Constellation After FFT\n(N=%d, CFO=%.1fMHz 未补偿)', N_rx_fft, freq_offset/1e6)); 
+    axis square; grid on;
     xlabel('I'); ylabel('Q'); xlim([-2 2]); ylim([-2 2]);
     
-    % 4. 简单的硬判决与误码率
+    % 4. 简单的硬判决与误码率 (长度可能不匹配，仅做长度安全检查后对比或省略报错)
     rx_phase = angle(rx_sc_total);
     % 映射回 0,1,2,3: (phase - pi/4) / (pi/2) -> rounds to int
     rx_int = mod(round((rx_phase - pi/4) / (pi/2)), 4);
     
-    bit_errs = sum(rx_int ~= sss_ref_data);
-    fprintf('   SSS Symbol Errors (Raw): %d / %d\n', bit_errs, length(sss_ref_data));
+    len_check = min(length(rx_int), length(sss_ref_data));
+    bit_errs = sum(rx_int(1:len_check) ~= sss_ref_data(1:len_check));
+    fprintf('   SSS Symbol Errors (Raw, first %d bits check): %d / %d\n', len_check, bit_errs, len_check);
 else
     fprintf('   [Warning] Received signal too short to verify SSS.\n');
 end

@@ -1,8 +1,8 @@
 % estimate_sss_cp.m
 % 精确寻找 CP 长度 - 步长为1的高精度遍历 + Kneedle
 clear; clc; close all;
-inFile = "sigtest8.iq";
-startSample = 15564 + 874*8-200;
+inFile = "sigtest1.iq";
+startSample = 16386+874*6-200;
 readLen = 20000;
 delay_D = 6992;
 fprintf("Loading data...\\n");

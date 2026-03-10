@@ -18,11 +18,11 @@ fs_target = 60e6;
 % 请根据 gardner_farrow_timing_recovery.m 的输出回填这里
 % 示例值：
 sro_ppm  = 0;       % 采样率偏差 (ppm)
-cfo_hz   = 17556;    % 载波频偏 (Hz)
+cfo_hz   = 3079075.69;    % 载波频偏 (Hz)
 
 % SSS 长度: 1个 OFDM 符号 = 1024 点 (假设无 CP 或与 pss_test.m 一致)
 N_fft = 1024;
-target_offset = -3; % 指定你想要测试的偏移量
+target_offset = -5; % 指定你想要测试的偏移量
 freq_shift_hz = 63e6; % 频谱归基带向左搬移 63MHz
 
 %% 2. 读取原始数据
@@ -94,68 +94,36 @@ fprintf('Analyzing Time Domain Signal...\n');
 % 这是因为 Farrow 插值等操作如果不舍弃前面的数据会导致索引报错，我们强制给出一个安全 Buffer
 base_start_idx = 21; 
 
-fig_const = figure('Position', [300, 300, 600, 600], 'Name', 'SSS Demodulation Result');
-
-% 遍历偏移量从 -20 到 +20
-for offset = -5 : 0
-    sss_start_idx_60 = base_start_idx + offset;
-        
-    % 防止越界
-    if sss_start_idx_60 < 1 || sss_start_idx_60 + N_fft > length(x_sro)
-        warning('Offset %d 导致下标越界，跳过。', offset);
-        continue;
-    end
+% 不再遍历，直接使用全局参数指定的偏移量
+offset = target_offset;
+sss_start_idx_60 = base_start_idx + offset;
     
-    x_sss_time = x_sro(sss_start_idx_60 : sss_start_idx_60 + N_fft - 1);
-    
-    %% 6. OFDM 解调 (FFT) 与 小数定时偏差/相位纠正
-    x_sss_freq = fft(x_sss_time, N_fft) / sqrt(N_fft);  
-    
-    % 在这里我们先提取出有效子载波用来做相位拟合 (去除空载波对拟合的影响)
-    half_sc = 412;
-    idx_pos = 2 : (half_sc + 1);
-    idx_neg = (N_fft - half_sc + 1) : N_fft;
-    
-    % 将正、负频率轴拼接并映射出一条统一的 -half_sc 到 +half_sc 逻辑坐标轴
-    syms_valid = [x_sss_freq(idx_neg); x_sss_freq(idx_pos)]; 
-    freq_indices = [-half_sc:-1, 1:half_sc].';
-
-    % 1. 消除调制相位的四次方操作
-    syms_pow4 = syms_valid.^4;
-    
-    % 2. 提取包裹后的相位，并展开 (unwrap)，因为相位随频率可能是线性变化且跨越平面的
-    phase_pow4 = unwrap(angle(syms_pow4));
-    
-    % 3. Polyfit 线性拟合: Phase = P(1)*f + P(2)
-    % 其中 P(1) 代表由于小数定时偏差引起的一阶斜率，P(2) 代表系统初相
-    P = polyfit(freq_indices, phase_pow4, 1);
-    
-    % 4. 计算补偿用相位：除以 4 恢复出原始偏移
-    % 这里我们构建全体1024点的补偿向量以作用于所有的子载波
-    full_freq_indices = [(0:N_fft/2-1), (-N_fft/2:-1)].';
-    phase_correction = (P(1) * full_freq_indices + P(2)) / 4;
-    
-    % 5. 应用补偿
-    x_sss_freq_corr = x_sss_freq .* exp(-1j * phase_correction);
-
-    % 提取所有子载波用于最终显示
-    syms_all = x_sss_freq_corr(:);
-    
-    %% 7. 绘图
-    clf(fig_const); % 清除上一帧的图
-    plot(real(syms_all), imag(syms_all), 'b.', 'MarkerSize', 8);
-    hold on; grid on; axis square;
-    
-    th = 0:0.01:2*pi;
-    plot(cos(th), sin(th), 'k:', 'LineWidth', 0.5); % 单位圆
-    
-    title(sprintf('SSS Constellation\nStart Offset: %d 点\nResidual STO slope: %.4f\n(Press Enter for next)', offset, P(1)/4));
-    xlabel('I'); ylabel('Q');
-    xlim([-2 2]); ylim([-2 2]);
-    
-    fprintf('\n显示 Offset = %d 的结果。按 Enter 继续...\n', offset);
-    pause;
+% 防止越界
+if sss_start_idx_60 < 1 || sss_start_idx_60 + N_fft > length(x_sro)
+    error('Offset %d 导致下标越界，请调整 readLen 或是 offset。', offset);
 end
+
+x_sss_time = x_sro(sss_start_idx_60 : sss_start_idx_60 + N_fft - 1);
+
+%% 6. OFDM 解调 (FFT)
+x_sss_freq = fft(x_sss_time, N_fft) / sqrt(N_fft);  
+
+% 提取所有子载波
+syms_all = x_sss_freq(:);
+
+%% 7. 绘图
+fig_const = figure('Position', [300, 300, 600, 600], 'Name', 'SSS Demodulation Result');
+plot(real(syms_all), imag(syms_all), 'b.', 'MarkerSize', 8);
+hold on; grid on; axis square;
+
+th = 0:0.01:2*pi;
+plot(cos(th), sin(th), 'k:', 'LineWidth', 0.5); % 单位圆
+
+title(sprintf('SSS Constellation\nStart Offset: %d 点', offset));
+xlabel('I'); ylabel('Q');
+xlim([-2 2]); ylim([-2 2]);
+
+fprintf('\n解调结束，显示 Offset = %d 的结果。\n', offset);
 
 fprintf('\n所有偏移点遍历结束。\n');
 

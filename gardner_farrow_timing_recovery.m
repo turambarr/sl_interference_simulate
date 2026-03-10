@@ -16,7 +16,7 @@ totalSamples = floor(fileBytes / 4); % int16 I/Q = 4 bytes
 
 % 定义此时我们关心的“信号范围” (Original ROI)
 % 这是用户之前 manually set 的范围
-roi_start_in = 19934 - 874*5;
+roi_start_in = 15564;
 roi_len_in   = 874*8;
 
 startSample = 0;             % 从头读
@@ -25,6 +25,7 @@ readLen     = totalSamples;  % 读全部
 % 基础采样率参数
 fs_source   = 409.6e6;       % 源采样率
 fs_symbol   = 60e6;          % 目标符号速率 (Symbol Rate)
+freq_shift_hz = 63e6;        % 频谱归基带向左搬移 63MHz
 
 % 整数降采样参数
 int_decim   = 3;             % 第一步降采样倍数
@@ -42,6 +43,11 @@ fprintf('读取文件: %s (Start=%d, Len=%d)\n', inFile, startSample, readLen);
 x_raw = double(x_raw);
 x_raw = x_raw - mean(x_raw); 
 x_raw = x_raw / mean(abs(x_raw)); % 归一化
+
+%% 2.x 频谱下变频 (DDC 归基带)
+fprintf('Shifting spectrum left by %.1f MHz at 409.6MHz...\n', freq_shift_hz/1e6);
+t_vec = (0:length(x_raw)-1) / fs_source;
+x_raw = x_raw .* exp(-1j * 2 * pi * freq_shift_hz * t_vec).';
 
 %% 2.1 时域波形概览 (新增)
 figure('Position', [50, 50, 1000, 400], 'Name', 'Time Domain Overview');

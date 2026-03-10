@@ -20,7 +20,7 @@ removeMean = false;      % true: 去直流
 % Welch参数
 segLen = 65536;     % 每段长度（复采样点数）
 overlapRatio = 0.5; % 重叠比例 [0,1)
-nfft = 65536;       % FFT点数（>=segLen）
+nfft = 1024;       % FFT点数（>=segLen）
 
 %% 读取数据
 [x, meta] = iq_read_int16_le(inFile, startSample, Nread);
