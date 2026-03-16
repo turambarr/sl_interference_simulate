@@ -1,0 +1,12 @@
+fs_source = 409.6e6;
+fs_target = 60e6;
+for readLen = [6992, 7000, 7500]
+    T_in = 1 / fs_source;
+    T_out = 1 / fs_target;
+    t_out = 0 : T_out : (readLen-3)*T_in;
+    idx_frac = t_out / T_in + 1;
+    idx_base = floor(idx_frac);
+    valid_mask = (idx_base >= 2) & (idx_base <= readLen-2);
+    out_len = sum(valid_mask);
+    fprintf('readLen=%d, Output Limit=%d\n', readLen, out_len);
+end

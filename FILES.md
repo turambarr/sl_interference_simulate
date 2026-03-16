@@ -279,6 +279,58 @@ burst #173: [267360256..267404287] (len=44032)
   - 适用：观察频谱随时间/样点变化。
   - 备注：脚本注释写“每 50000 点”，实际参数由 `blockLen` 控制；以脚本参数为准。
 
+- `plot_full_signal_energy.m`
+  - 作用：对整段或大范围 IQ 数据进行能量可视化，快速定位高能量 burst 区间。
+  - 适用：做粗粒度“先找哪里有信号、再做精细解调”的预筛选。
+
+- `plot_subcarrier_energy.m`
+  - 作用：将指定区间信号经 DDC、CFO、Farrow 重采样后，按 1024 点 FFT 统计**平均子载波功率**，用于肉眼确认有效子载波边界。
+  - 当前参数风格：与 SSS 解调脚本统一为 3 个手动参数：
+    - `read_start_sample`：开始读取点
+    - `read_length`：读取长度
+    - `sss_decode_start_idx`：重采样后分析起点
+  - 图形：支持主图+局部放大（用于观察“断崖边缘”）；可用于反推固定索引区间。
+
+---
+
+## SSS 解调与调试
+
+- `sss_demodulation.m`
+  - 作用：**单点解调**脚本。对指定偏移 `target_offset` 完成 SSS 频域相位补偿、QPSK 硬判决、Hex 输出。
+  - 输入参数（手动填写）：
+    - `read_start_sample`
+    - `read_length`
+    - `sss_decode_start_idx`
+  - 关键流程：
+    - 409.6MHz 下先做 `-63MHz` DDC
+    - CFO 补偿
+    - LPF + Farrow 重采样到 60MHz
+    - 1024 点 FFT
+    - 有效子载波检测（动态阈值 + `dc_guard`）
+    - 分段 `unwrap` + 分段 `polyfit` 做 4 次方域斜率估计并补偿
+  - 当前输出：
+    - 星座图
+    - 4 组旋转歧义候选序列（0°/90°/180°/270°）的完整 Hex（命令窗打印）
+    - 支持“全部 1024 子载波”或“仅有效子载波”两种解调模式。
+
+- `sss_demodulation_sweep.m`
+  - 作用：**偏移遍历实验**脚本。对 `offset_range` 中每个偏移重复解调并输出摘要，便于挑选最佳对齐点。
+  - 与单点脚本分离原因：避免“最终解调逻辑”和“扫描试验逻辑”互相污染。
+  - 关键特性：
+    - 使用与 `sss_demodulation.m` 同一套前处理与相位补偿策略
+    - 每个 offset 输出：有效载波数/解调片段 Hex
+    - 支持暂停逐帧查看（`pause_each=true`）
+    - 支持全子载波解调模式开关。
+
+- `estimate_sss_cp_60mhz.m`
+  - 作用：围绕 60MHz 域的 SSS/CP 位置估计与诊断，辅助给出解调窗口的候选起点。
+
+- `check_sss_read_location.m`
+  - 作用：用于核验读取起点与窗口位置是否落在预期 burst/符号附近，减少“读偏”导致的误判。
+
+- `SSS_Demodulation_Process.md`
+  - 作用：SSS 解调流程说明文档，记录从粗同步到最终比特解调的步骤与关键参数。
+
 ---
 
 ## OFDM 符号定位（基于 CP 相关）
@@ -362,4 +414,113 @@ burst #173: [267360256..267404287] (len=44032)
 -
 - `.git/`
   - Git 仓库元数据目录。
+
+---
+
+## 全量文件速查（按当前目录）
+
+> 说明：下面按“单文件 + 批量模式”覆盖当前目录全部文件，描述保持简短。
+
+### 1) 系统/仓库/文档文件
+
+- `.DS_Store`：macOS 目录缓存文件（可忽略）。
+- `.gitignore`：Git 忽略规则。
+- `FILES.md`：本文件，项目文件功能说明。
+- `SSS_Demodulation_Process.md`：SSS 解调流程文档。
+- `burst_info.txt`：burst 区间或统计结果文本。
+- `上行信号分析进展与疑问2.10.docx`：中文分析报告文档。
+- `上行信号分析进展与疑问2.10(1).docx`：中文分析报告文档（版本副本）。
+- `对上行信号的分析(1)(2).docx`：中文分析报告文档（版本副本）。
+
+### 2) 原始/裁切 IQ 数据文件
+
+- `20250912222305_part1.iq`：原始采集 IQ（通常含头）。
+- `20250912222305_part1_cut1.iq`：裁切 IQ 数据片段。
+- `20250912222305_part1_cut2.iq`：裁切 IQ 数据片段。
+- `20250912222305_part1_cut3.iq`：裁切 IQ 数据片段。
+
+### 3) 批量测试 IQ 数据文件
+
+- `sigtest1.iq` ~ `sigtest173.iq`：批量测试 IQ 数据集（编号样本）。
+- `sigtest1_test.iq`、`sigtest2_test.iq`、`sigtest3_test.iq`：特定测试版样本。
+- `test1.iq`、`test2.iq`、`test3.iq`、`test4.iq`：独立测试样本文件。
+
+### 4) 读取/裁切/基础处理脚本
+
+- `read_iq_file.m`：带头文件读取与头部探测。
+- `iq_read_int16_le.m`：纯数据 IQ 读取函数（int16 little-endian）。
+- `cut_iq_by_samples.m`：按复采样点区间裁切 IQ 文件。
+- `batch_cut_bursts.m`：按 burst 批量切片导出。
+- `read_iq_file.m`：文件头和数据类型检查。
+
+### 5) 时域、频域、星座图可视化
+
+- `plot_time_domain.m`：时域波形与可选 burst 标注。
+- `plot_psd.m`：单段 Welch PSD。
+- `plot_psd_blocks.m`：分块 PSD（随时间观察）。
+- `plot_full_signal_energy.m`：全段能量可视化。
+- `plot_subcarrier_energy.m`：1024 子载波平均功率/边界观察。
+- `constellation.m`：基础星座图绘制。
+- `constellation_interp.m`：插值后星座分析。
+- `plot_constellation_fixed_D.m`：固定参数 D 的星座显示。
+- `plot_constellation_range.m`：参数范围扫描的星座显示。
+- `check_ofdm_constellation.m`：OFDM 星座检查。
+- `check_ofdm_psd.m`：OFDM 频谱检查。
+- `check_modulation_type.m`：调制方式粗判别。
+
+### 6) 自相关/互相关/结构搜索
+
+- `autocorr_test1.m`：自相关基础验证。
+- `autocorr_test2_slide128.m`：滑窗自相关热图。
+- `autocorr_test2_slide128_curve.m`：滑窗自相关曲线动画。
+- `autocorr_test2_blind_search.m`：盲搜参数下的自相关扫描。
+- `autocorr_test2_visual_scan.m`：可视化批量扫描窗口长度/参数。
+- `autocorr_find_structure_auto.m`：自动化结构搜索（自相关方向）。
+- `cross_corr_sig1_sig2.m`：两段信号互相关定位。
+- `corr_sigtest1_sigtest2.m`：sigtest1/sigtest2 相关对比。
+- `cross_corr_interp.m`：插值互相关。
+- `find_best_match_across_files.m`：跨文件最佳匹配搜索。
+- `analyze_data_structure.m`：数据结构分析总脚本。
+- `highlight_structure_sigtest1.m`：sigtest1 结构高亮查看。
+
+### 7) OFDM 同步/估计/验证链路
+
+- `locate_ofdm_symbols_cp.m`：基于 CP 的 OFDM 符号起点定位。
+- `estimate_ofdm_cp_locations.m`：CP 定位函数封装。
+- `estimate_main.m`：估计主入口（action 分发）。
+- `run_estimate_main.m`：估计入口的运行参数脚本。
+- `find_frame_guard_intervals.m`：帧间保护间隔检测。
+- `segment_head_tail_similarity.m`：CP 首尾相似度验证。
+- `run_segment_similarity.m`：相似度验证入口脚本。
+- `estimate_sss_cp.m`：SSS/CP 位置估计脚本（早期/通用版）。
+- `estimate_sss_cp_60mhz.m`：60MHz 域 SSS/CP 估计脚本。
+- `check_sss_read_location.m`：读取窗口和 SSS 位置核验。
+
+### 8) SSS/PSS 解调与同步脚本
+
+- `sss_demodulation.m`：SSS 单点解调主脚本（含相位补偿、Hex 输出）。
+- `sss_demodulation_sweep.m`：SSS 偏移遍历解调脚本。
+- `gardner_farrow_timing_recovery.m`：Gardner + Farrow 定时恢复链路。
+- `gardner_sps_demo.m`：Gardner 定时恢复演示。
+- `precise_sps_resample_demo.m`：精细采样率/插值重采样演示。
+- `pss.m`：PSS 相关功能脚本/函数。
+- `pss_test.m`：PSS 测试主脚本。
+- `pss_sdpsk_fullchain_demo.m`：PSS/SDPSK 全链路演示。
+- `mseq_matched_filter_sync.m`：m 序列匹配滤波同步。
+- `check_mseq.m`：m 序列检查脚本。
+
+### 9) 其他算法实验脚本
+
+- `can_val_align.m`：候选值/序列对齐实验脚本。
+- `find_best_match_across_files.m`：跨文件匹配评估。
+- `optimize_D_kmeans.m`：基于 KMeans 的参数 D 优化尝试。
+- `test_farrow_length.m`：Farrow 长度敏感性测试。
+- `test_farrow_length2.m`：Farrow 长度敏感性测试（第二版）。
+- `test_mseq_qpsk_correlation.m`：m 序列与 QPSK 相关测试。
+
+### 10) MATLAB 自动备份文件
+
+- `autocorr_test2_slide128.asv`：`autocorr_test2_slide128.m` 自动保存副本。
+- `pss_test.asv`：`pss_test.m` 自动保存副本。
+- `sss_demodulation.asv`：`sss_demodulation.m` 自动保存副本。
 

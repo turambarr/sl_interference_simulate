@@ -1,13 +1,16 @@
 % sss_demodulation.m
-% SSS 符号解调脚本 (OFDM + 4QAM)
+% SSS 单点解调脚本 (OFDM + 4QAM)
 % 基于 GARDNER 模块估计出的 SRO 和 CFO 进行预修正
 
 clear; clc; close all;
 
 %% 1. 参数设置
-inFile = 'sigtest1.iq';
-startSample = 16386+874*6+218; 
-readLen = 7000;     % 稍微多读一点，防止重采样后点数不足 1024
+inFile = 'sigtest62.iq';
+
+% ===== 手动填写的 3 个关键参数 =====
+read_start_sample = 5646-874; % [参数1] 文件中开始读取的点（原始采样点）
+read_length = 6992*3+1000;                  % [参数2] 读取长度（原始采样点个数）
+sss_decode_start_idx = 1048;           % [参数3] 从重采样后序列 x_sro 的第几个点开始作为 SSS 解调基准
 
 % 原始采样率
 fs_source = 409.6e6;
@@ -22,12 +25,18 @@ cfo_hz   = 17556;    % 载波频偏 (Hz)
 
 % SSS 长度: 1个 OFDM 符号 = 1024 点 (假设无 CP 或与 pss_test.m 一致)
 N_fft = 1024;
-target_offset = -3; % 指定你想要测试的偏移量
+target_offset = 0; % 指定你想要测试的偏移量
 freq_shift_hz = 63e6; % 频谱归基带向左搬移 63MHz
 
+% 解调模式：true=解调全部1024子载波；false=仅解调有效子载波
+demod_all_subcarriers = true;
+
+% 判决前整体旋转角（用于把落在坐标轴上的点转回4QAM象限中心）
+decision_rotate_deg = 45;
+
 %% 2. 读取原始数据
-fprintf('Loading file: %s from %d, len %d...\n', inFile, startSample, readLen);
-[x_raw, ~] = iq_read_int16_le(inFile, startSample, readLen);
+fprintf('Loading file: %s from %d, len %d...\n', inFile, read_start_sample, read_length);
+[x_raw, ~] = iq_read_int16_le(inFile, read_start_sample, read_length);
 x_raw = double(x_raw);
 
 % 归一化
@@ -90,105 +99,195 @@ x_sro = x_sro(:); % 转为列向量
 %% 5. 定位 SSS 符号与时域分析
 fprintf('Analyzing Time Domain Signal...\n');
 
-% 为了能往前看，我们把基础点往后挪20，也就是从重采样后数据的第21个点开始作为我们的 "0 延时基准"
-% 这是因为 Farrow 插值等操作如果不舍弃前面的数据会导致索引报错，我们强制给出一个安全 Buffer
-base_start_idx = 21; 
+% 这里使用你手动填写的解调起始点（x_sro 坐标）
+base_start_idx = sss_decode_start_idx;
 
-fig_const = figure('Position', [300, 300, 600, 600], 'Name', 'SSS Demodulation Result');
+fig_const = figure('Position', [300, 300, 600, 600], 'Name', 'SSS Demodulation Result (Single Offset)');
 
-% 遍历偏移量从 -20 到 +20
-for offset = -5 : 0
-    sss_start_idx_60 = base_start_idx + offset;
+% 单点偏移测试（不做遍历）
+offset = target_offset;
+sss_start_idx_60 = base_start_idx + offset;
         
     % 防止越界
-    if sss_start_idx_60 < 1 || sss_start_idx_60 + N_fft > length(x_sro)
-        warning('Offset %d 导致下标越界，跳过。', offset);
-        continue;
-    end
-    
-    x_sss_time = x_sro(sss_start_idx_60 : sss_start_idx_60 + N_fft - 1);
-    
-    %% 6. OFDM 解调 (FFT) 与 小数定时偏差/相位纠正
-    x_sss_freq = fft(x_sss_time, N_fft) / sqrt(N_fft);  
-    
-    % 在这里我们先提取出有效子载波用来做相位拟合 (去除空载波对拟合的影响)
-    half_sc = 412;
-    idx_pos = 2 : (half_sc + 1);
-    idx_neg = (N_fft - half_sc + 1) : N_fft;
-    
-    % 将正、负频率轴拼接并映射出一条统一的 -half_sc 到 +half_sc 逻辑坐标轴
-    syms_valid = [x_sss_freq(idx_neg); x_sss_freq(idx_pos)]; 
-    freq_indices = [-half_sc:-1, 1:half_sc].';
-
-    % 1. 消除调制相位的四次方操作
-    syms_pow4 = syms_valid.^4;
-    
-    % 2. 提取包裹后的相位，并展开 (unwrap)，因为相位随频率可能是线性变化且跨越平面的
-    phase_pow4 = unwrap(angle(syms_pow4));
-    
-    % 3. Polyfit 线性拟合: Phase = P(1)*f + P(2)
-    % 其中 P(1) 代表由于小数定时偏差引起的一阶斜率，P(2) 代表系统初相
-    P = polyfit(freq_indices, phase_pow4, 1);
-    
-    % 4. 计算补偿用相位：除以 4 恢复出原始偏移
-    % 这里我们构建全体1024点的补偿向量以作用于所有的子载波
-    full_freq_indices = [(0:N_fft/2-1), (-N_fft/2:-1)].';
-    phase_correction = (P(1) * full_freq_indices + P(2)) / 4;
-    
-    % 5. 应用补偿
-    x_sss_freq_corr = x_sss_freq .* exp(-1j * phase_correction);
-
-    % 提取所有子载波用于最终显示
-    syms_all = x_sss_freq_corr(:);
-    
-    %% 7. 绘图
-    clf(fig_const); % 清除上一帧的图
-    plot(real(syms_all), imag(syms_all), 'b.', 'MarkerSize', 8);
-    hold on; grid on; axis square;
-    
-    th = 0:0.01:2*pi;
-    plot(cos(th), sin(th), 'k:', 'LineWidth', 0.5); % 单位圆
-    
-    title(sprintf('SSS Constellation\nStart Offset: %d 点\nResidual STO slope: %.4f\n(Press Enter for next)', offset, P(1)/4));
-    xlabel('I'); ylabel('Q');
-    xlim([-2 2]); ylim([-2 2]);
-    
-    fprintf('\n显示 Offset = %d 的结果。按 Enter 继续...\n', offset);
-    pause;
+if sss_start_idx_60 < 1 || sss_start_idx_60 + N_fft > length(x_sro)
+    error('Offset %d 导致下标越界，无法计算。', offset);
 end
 
-fprintf('\n所有偏移点遍历结束。\n');
+x_sss_time = x_sro(sss_start_idx_60 : sss_start_idx_60 + N_fft - 1);
+    
+%% 6. OFDM 解调 (FFT) 与 小数定时偏差/相位纠正
+x_sss_freq = fft(x_sss_time, N_fft) / sqrt(N_fft);  
+    
+% 在这里我们先提取出有效子载波用来做相位拟合 (去除空载波对拟合的影响)
+% --- 修正：采用幅度判断法自动鉴别有效载波边缘，而不是写死 824 ---
+% 计算频点功率，找出平均功率，滤除深陷低于某个阈值的零点或衰落点
+pwr_bins = abs(x_sss_freq).^2;
+mean_pwr = mean(pwr_bins);
+threshold_pwr = mean_pwr * 0.1; % 设定阈值（例如低于均值 1/10 的当成是噪声空载波）
+    
+% 找到功率大于阈值的点作为有效子载波 (不把处于基带 0Hz 附近或边缘的无效点算进来)
+valid_mask_power = pwr_bins > threshold_pwr;
+    
+% 进一步滤除最最中心的直流点(DC, 也就是 MATLAB index 1 附近的高风险带)
+% 我们可以用一段保护带来防住零载波
+dc_guard = 3; % 左右丢弃几个子载波当做保护段免受本振泄露干扰
+valid_mask_power(1:dc_guard) = false;
+valid_mask_power(N_fft-dc_guard+1:N_fft) = false;
+    
+% 获取有效载波的索引 (逻辑 1-1024)
+valid_idxs = find(valid_mask_power);
+    
+% 构建基于物理频率的相对频率轴(-512 to 511)
+% N_fft/2+1 到 N_fft 是负频点
+rel_freq = zeros(N_fft, 1);
+rel_freq(1:N_fft/2) = (0:N_fft/2 - 1).'; 
+rel_freq(N_fft/2+1:N_fft) = (-N_fft/2:-1).';
+    
+freq_indices = rel_freq(valid_idxs);
+syms_valid = x_sss_freq(valid_idxs);
 
-% 下面是原本的一些被注释掉的相位修正逻辑 (跳过执行以防报错)
-return;
+% --- 严重 BUG 修复：必须对频率进行从小到大排序 ---
+% 原始的 FFT 抽取顺序是先从 0 到 +511，再从 -512 到 -1
+% 如果不排序（也就是从最高正频率突然跳变到最低负频率），unwrap 解卷绕时会产生巨大的 2*pi 错位！
+% 这将彻底毁掉后面的 polyfit 线性拟合，导致所有的相位补偿全错
+[freq_indices, sort_idx] = sort(freq_indices);
+syms_valid = syms_valid(sort_idx);
+    
+% 注意：由于我们对 valid_idxs 对应的 syms_valid 进行了重排，后续根据 valid_idxs 原顺序截取 hard bits 会不对应
+% 所以最后用来打印 Bits 的 valid_idxs 也必须一起重排，才能正确找到对应的子载波
+valid_idxs = valid_idxs(sort_idx);
 
-% 自动相位修正 (去除残留相位旋转)
-% 就算 CFO 去除了，相位初相可能还是乱的 (Global Phase Rotation)
-% 我们可以尝试去旋转
-% 找一个使得点最聚拢的角度? 或者简单地看均值(如果是4QAM, E[x^4] = -1)
-% % --- 暂时注释掉盲相位补偿的四次方模糊度 --- 
-% mean_pow4 = mean(syms_all.^4); 
-% est_phase_bias = angle(mean_pow4) / 4; 
-% % 4次方会把 pi/4 映射到 pi, 所以...
-% % QPSK 4次方都是 -1 (exp(j*pi)=-1)
-% % 比如 exp(j*pi/4)^4 = exp(j*pi) = -1
-% % 如果有一个偏差 phi, 则 (exp(j(pi/4+phi)))^4 = -1 * exp(j*4phi)
-% % angle(mean) = angle(-1 * exp(j4phi)) = pi + 4phi
-% % 4phi = angle - pi
-% % phi = (angle - pi) / 4
-% est_phase_bias = (angle(mean_pow4) - pi) / 4;
-% 
-% fprintf('Estimated Global Phase Offset: %.2f degrees\n', est_phase_bias * 180/pi);
-% 
-% % 补偿相位
-% syms_all_rot = syms_all * exp(-1j * est_phase_bias);
-% 
-% figure('Position', [950, 300, 600, 600], 'Name', 'SSS Constellation (Phase Corrected)');
-% plot(real(syms_all_rot), imag(syms_all_rot), 'b.', 'MarkerSize', 8);
-% grid on; axis square;
-% title('SSS Constellation (Global Phase Corrected)');
-% xlabel('I'); ylabel('Q');
-% xlim([-2 2]); ylim([-2 2]);
-% hold on;
-% plot(real(ref_pts_rot), imag(ref_pts_rot), 'rx', 'MarkerSize', 12, 'LineWidth', 2);
+% ===== 使用 sweep 中验证过的相位估计逻辑：分段 unwrap + 分段 polyfit =====
+syms_pow4 = syms_valid.^4;
+df = diff(freq_indices);
+
+% 以 df>1 的位置作为频率断点（例如跨越 DC 缺口）
+seg_start = [1; find(df > 1) + 1];
+seg_end   = [find(df > 1); length(freq_indices)];
+
+slope_list = [];
+w_list = [];
+for k = 1:length(seg_start)
+    idx_seg = seg_start(k):seg_end(k);
+    if numel(idx_seg) < 8
+        continue;
+    end
+
+    f_seg = freq_indices(idx_seg);
+    ph_seg = unwrap(angle(syms_pow4(idx_seg)));
+    p_seg = polyfit(f_seg, ph_seg, 1);
+
+    slope_list(end+1,1) = p_seg(1); %#ok<SAGROW>
+    w_list(end+1,1) = numel(idx_seg); %#ok<SAGROW>
+end
+
+if isempty(slope_list)
+    error('Offset %d 连续有效载波不足，无法完成分段相位拟合。', offset);
+end
+
+% 用段长加权平均估计 4 次方域斜率
+slope4 = sum(slope_list .* w_list) / sum(w_list);
+
+% 已知 slope4 后，用复均值估计 4 次方域常量相位项（对噪声更稳）
+pow4_detrended = syms_pow4 .* exp(-1j * slope4 * freq_indices);
+phase0_4 = angle(mean(pow4_detrended));
+
+% 计算补偿用相位：除以 4 恢复出原始偏移
+full_freq_indices = [(0:N_fft/2-1), (-N_fft/2:-1)].';
+phase_correction = (slope4 * full_freq_indices + phase0_4) / 4;
+    
+% 5. 应用补偿
+x_sss_freq_corr = x_sss_freq .* exp(-1j * phase_correction);
+
+% 提取所有子载波用于最终显示
+syms_all = x_sss_freq_corr(:);
+    
+%% 7. 绘图与解调判决
+clf(fig_const); % 清除上一帧的图
+    
+% --- 绘制星座图 ---
+subplot(1, 2, 1);
+syms_all_plot = syms_all .* exp(1j * decision_rotate_deg * pi/180);
+plot(real(syms_all_plot), imag(syms_all_plot), 'b.', 'MarkerSize', 8);
+hold on; grid on; axis square;
+    
+th = 0:0.01:2*pi;
+plot(cos(th), sin(th), 'k:', 'LineWidth', 0.5); % 单位圆
+    
+title(sprintf('SSS Constellation (Rotated %d°)\nStart Offset: %d 点\nResidual STO slope: %.4f', decision_rotate_deg, offset, slope4/4));
+xlabel('I'); ylabel('Q');
+xlim([-2 2]); ylim([-2 2]);
+    
+% --- 提取有效载波并进行 4QAM (QPSK) 硬判决 ---
+subplot(1, 2, 2);
+% 从已做相位补偿的全频段数据中提取待解调子载波
+if demod_all_subcarriers
+    syms_payload = x_sss_freq_corr(:);  % 全部 1024 子载波
+    payload_label = sprintf('All carriers: %d', N_fft);
+else
+    syms_payload = x_sss_freq_corr(valid_idxs);
+    payload_label = sprintf('Valid carriers: %d', length(valid_idxs));
+end
+    
+% 执行 4QAM/QPSK 极性硬判决
+% 先整体旋转 decision_rotate_deg，再考虑 QPSK 的 90/180/270 度歧义
+rot_angles_deg = decision_rotate_deg + [0, 90, 180, 270];
+hex_candidates = cell(1, 4);
+demod_bits_candidates = cell(1, 4);
+
+for r = 1:4
+    % 旋转补偿候选：decision_rotate_deg + {0,90,180,270} 度
+    syms_payload_rot = syms_payload .* exp(1j * decision_rotate_deg * pi/180) .* exp(-1j * (r-1) * pi/2);
+
+    bits_I = real(syms_payload_rot) < 0;
+    bits_Q = imag(syms_payload_rot) < 0;
+
+    % 将 I 和 Q 合并成一溜长比特数据流 (I,Q交织存放)
+    demod_bits = zeros(length(syms_payload_rot)*2, 1);
+    demod_bits(1:2:end) = bits_I;
+    demod_bits(2:2:end) = bits_Q;
+    demod_bits_candidates{r} = demod_bits;
+
+    % --- 将解调出的所有比特转化为完整的 Hex 字符串 ---
+    full_hex_str = '';
+    for i_hex = 1:4:length(demod_bits)
+        if i_hex+3 > length(demod_bits)
+            % 如果最后有不足 4 比特的零碎数据，补齐处理
+            chunk = demod_bits(i_hex:end);
+            val = 0;
+            for b = 1:length(chunk)
+                val = val + chunk(b) * 2^(length(chunk)-b);
+            end
+            full_hex_str = [full_hex_str, dec2hex(val)]; %#ok<AGROW>
+            break;
+        end
+        chunk = demod_bits(i_hex:i_hex+3);
+        val = chunk(1)*8 + chunk(2)*4 + chunk(3)*2 + chunk(4)*1;
+        full_hex_str = [full_hex_str, dec2hex(val)]; %#ok<AGROW>
+    end
+
+    hex_candidates{r} = full_hex_str;
+end
+    
+% 在副图仅打印前 32 个 hex 字符作预览即可
+axis off;
+title('Demodulated Hard Bits');
+hex_snip_0   = hex_candidates{1}(1:min(20, length(hex_candidates{1})));
+hex_snip_90  = hex_candidates{2}(1:min(20, length(hex_candidates{2})));
+hex_snip_180 = hex_candidates{3}(1:min(20, length(hex_candidates{3})));
+hex_snip_270 = hex_candidates{4}(1:min(20, length(hex_candidates{4})));
+text(0.05, 0.78, sprintf('Offset = %d\n0°  : %s...\n90° : %s...\n180°: %s...\n270°: %s...', ...
+    offset, hex_snip_0, hex_snip_90, hex_snip_180, hex_snip_270), 'FontSize', 11, 'Interpreter', 'none');
+text(0.05, 0.34, sprintf('Total bits: %d\n%s * 2 bit/sym', length(demod_bits_candidates{1}), payload_label), 'FontSize', 12);
+    
+% 无论 offset 是多少，都直接打印最终结果
+fprintf('\n>>> [Offset = %d] SSS Demodulation Completed! <<<\n', offset);
+fprintf('Extracted %d bits per candidate (%s).\n', length(demod_bits_candidates{1}), payload_label);
+fprintf('====== HEX CANDIDATES (QPSK 4-way rotation ambiguity) ======\n');
+for r = 1:4
+    fprintf('[%3d deg] %s\n', rot_angles_deg(r), hex_candidates{r});
+end
+fprintf('============================================================\n');
+
+fprintf('\n解调流程结束。\n');
 

@@ -5,12 +5,12 @@
 clear; clc; close all;
 
 %% 1. 参数设置
-inFile = 'sigtest1.iq';
+inFile = 'sigtest2.iq';
 
-% 你请求的：设定提取处理的 起点 和 终点 (或长度)
-% 这里的数值单位是 原始采样率 409.6MHz 的采样点，从 0 开始计数
-extract_start_sample = 21876+6992;              % 处理的起点标号 (比如改成 16386)
-extract_end_sample   = 28789+6992;         % 处理的终点标号 (设为 Inf 可以读到文件尾)
+% ===== 手动填写的 3 个关键参数（与 sss_demodulation_sweep.m 一致） =====
+read_start_sample = 16521-874;         % [参数1] 文件中开始读取的点（原始采样点）
+read_length = 6992*3+1000;             % [参数2] 读取长度（原始采样点个数）
+sss_decode_start_idx = 1048;           % [参数3] 从重采样后序列 x_sro 的第几个点开始作为分析基准
 
 fs_source = 409.6e6;
 fs_target = 60e6;
@@ -22,24 +22,18 @@ N_fft = 1024;
 target_offset = -4; 
 freq_shift_hz = 63e6; % 频谱向左搬移 63MHz 以归基带
 
+% 火柴梗图查看悬崖边界（可手动改）
+zoom_left_range = [340 460];   % 中心左侧边界观察窗口
+zoom_right_range = [560 680];  % 中心右侧边界观察窗口
+
 %% 2. 读取原始数据并绘制提取范围的时域图
 fprintf('Loading data for subcarrier check...\n');
-d = dir(inFile);
-full_len = floor(d.bytes / 4);
-
-% 安全限制终点
-if isinf(extract_end_sample) || extract_end_sample >= full_len
-    extract_end_sample = full_len - 1;
-end
-read_len = extract_end_sample - extract_start_sample + 1;
-
-% 正式读取设定的目标片段用于分析
-[x_raw, ~] = iq_read_int16_le(inFile, extract_start_sample, read_len);
+[x_raw, ~] = iq_read_int16_le(inFile, read_start_sample, read_length);
 x_raw = double(x_raw);
 
 figure('Name', 'Extracted Range Time Domain', 'Position', [100, 600, 1000, 300]);
-plot(extract_start_sample : extract_end_sample, abs(x_raw));
-title(sprintf('提取范围波形: %d ~ %d', extract_start_sample, extract_end_sample));
+plot(read_start_sample : (read_start_sample + read_length - 1), abs(x_raw));
+title(sprintf('提取范围波形: %d ~ %d', read_start_sample, read_start_sample + read_length - 1));
 xlabel('Sample Index (409.6MHz)'); ylabel('Amplitude');
 
 x_raw = x_raw - mean(x_raw);
@@ -87,6 +81,12 @@ x_sro = h0 .* x_cfo_filtered(idx_base - 1) + ...
         h3 .* x_cfo_filtered(idx_base + 2);
 x_sro = x_sro(:); 
 
+% 与 sweep 脚本对齐：从手工指定点开始做后续频域统计
+if sss_decode_start_idx < 1 || sss_decode_start_idx > length(x_sro)
+    error('sss_decode_start_idx=%d 越界，x_sro 长度=%d。', sss_decode_start_idx, length(x_sro));
+end
+x_sro = x_sro(sss_decode_start_idx:end);
+
 %% 5. 对分块提取 1024 点 FFT 并求平均能量
 % 将降采样后的整段 60MHz 信号切成 1024 段的 Block
 M = floor(length(x_sro) / N_fft);
@@ -101,26 +101,38 @@ mean_power = mean(abs(x_sss_freq_all).^2, 2);
 subcarrier_power_dB = 10 * log10(mean_power + 1e-12);
 
 %% 6. 绘制子载波能量分布
-figure('Name', 'Downsampled Subcarrier Energy', 'Position', [150, 150, 900, 450]);
-plot(1:N_fft, subcarrier_power_dB, 'b-', 'LineWidth', 1.5, 'DisplayName', 'FFT Bins Power');
+figure('Name', 'Downsampled Subcarrier Energy (Stem)', 'Position', [150, 150, 1000, 450]);
+stem(1:N_fft, subcarrier_power_dB, 'b', 'Marker', 'none', 'LineWidth', 1.0);
 hold on; grid on;
 
 max_power = max(subcarrier_power_dB);
-yline(max_power - 15, 'r--', 'Threshold (Signal vs Noise)', 'DisplayName', '-15dB Threshold');
 
-% 用色块标出预期代码中写死的正负有效载波区间 (正半轴 2:413, 负半轴 613:1024)
-x_fill1 = [2 413 413 2];
-x_fill2 = [613 1024 1024 613];
-y_fill = [max_power-60 max_power-60 max_power+10 max_power+10];
-
-patch(x_fill1, y_fill, 'm', 'FaceAlpha', 0.15, 'EdgeColor', 'none', 'DisplayName', 'Expected Pos Active (2:413)');
-patch(x_fill2, y_fill, 'g', 'FaceAlpha', 0.15, 'EdgeColor', 'none', 'DisplayName', 'Expected Neg Active (613:1024)');
-
-title(sprintf('指定范围(%d~%d)降采样后 %d 点 OFDM 平均子载波能量分布', extract_start_sample, extract_end_sample, N_fft));
+title(sprintf('指定范围(%d~%d), 基准点=%d, 降采样后 %d 点 OFDM 平均子载波能量分布', ...
+    read_start_sample, read_start_sample + read_length - 1, sss_decode_start_idx, N_fft));
 xlabel('MATLAB FFT Index (1 to 1024)');
 ylabel('Subcarrier Power (dB)');
 xlim([1 1024]);
 ylim([max_power - 50, max_power + 5]);
-legend('Location', 'south');
+
+% 放大观察“断崖”边界
+figure('Name', 'Subcarrier Cliff Zoom (Stem)', 'Position', [150, 650, 1000, 420]);
+
+subplot(1,2,1);
+stem(1:N_fft, subcarrier_power_dB, 'b', 'Marker', 'none', 'LineWidth', 1.0);
+grid on;
+xlim(zoom_left_range);
+ylim([max_power - 50, max_power + 5]);
+title(sprintf('左边界放大 [%d, %d]', zoom_left_range(1), zoom_left_range(2)));
+xlabel('FFT Index');
+ylabel('Power (dB)');
+
+subplot(1,2,2);
+stem(1:N_fft, subcarrier_power_dB, 'b', 'Marker', 'none', 'LineWidth', 1.0);
+grid on;
+xlim(zoom_right_range);
+ylim([max_power - 50, max_power + 5]);
+title(sprintf('右边界放大 [%d, %d]', zoom_right_range(1), zoom_right_range(2)));
+xlabel('FFT Index');
+ylabel('Power (dB)');
 
 fprintf('分析完成，请查看图像。通过观察能量凸起区域，可以校验代码中 412 的载波个数是否准确匹配。\n');
