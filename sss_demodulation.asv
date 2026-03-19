@@ -5,12 +5,12 @@
 clear; clc; close all;
 
 %% 1. 参数设置
-inFile = 'sigtest1.iq';
+inFile = 'sigtest62.iq';
 
 % ===== 手动填写的 3 个关键参数 =====
-read_start_sample = 5696-874; % [参数1] 文件中开始读取的点（原始采样点）
+read_start_sample = 5648-874; % [参数1] 文件中开始读取的点（原始采样点）
 read_length = 6992*3+1000;                  % [参数2] 读取长度（原始采样点个数）
-sss_decode_start_idx = 1048;           % [参数3] 从重采样后序列 x_sro 的第几个点开始作为 SSS 解调基准
+sss_decode_start_idx = 1048;           % [参数3] 从重采样后序列 x_sro 的第几个点开始作为 SSS 解调基准，也就是说SSS从此处开始
 
 % 原始采样率
 fs_source = 409.6e6;

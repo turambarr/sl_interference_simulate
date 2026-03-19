@@ -20,7 +20,7 @@ cfo_hz = 17556;
 N_fft = 1024;
 freq_shift_hz = 63e6;
 
-offset_range = 0:5;   % 遍历范围
+offset_range = 0:6;   % 遍历范围
 pause_each = true;      % 每个 offset 显示后是否暂停
 
 % 解调模式：true=解调全部1024子载波；false=仅解调有效子载波

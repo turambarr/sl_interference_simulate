@@ -7,7 +7,7 @@
 clear; clc; close all;
 
 %% 1. 参数设置
-inFile = 'sigtest8.iq'; 
+inFile = 'sigtest62.iq'; 
 
 % 自动获取文件全部长度进行处理
 fInfo = dir(inFile);
@@ -16,7 +16,7 @@ totalSamples = floor(fileBytes / 4); % int16 I/Q = 4 bytes
 
 % 定义此时我们关心的“信号范围” (Original ROI)
 % 这是用户之前 manually set 的范围
-roi_start_in = 15564;
+roi_start_in = 4886;
 roi_len_in   = 874*8;
 
 startSample = 0;             % 从头读

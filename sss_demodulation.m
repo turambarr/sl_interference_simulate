@@ -8,9 +8,9 @@ clear; clc; close all;
 inFile = 'sigtest62.iq';
 
 % ===== 手动填写的 3 个关键参数 =====
-read_start_sample = 5646-874; % [参数1] 文件中开始读取的点（原始采样点）
+read_start_sample = 5648-874; % [参数1] 文件中开始读取的点（原始采样点）
 read_length = 6992*3+1000;                  % [参数2] 读取长度（原始采样点个数）
-sss_decode_start_idx = 1048;           % [参数3] 从重采样后序列 x_sro 的第几个点开始作为 SSS 解调基准
+sss_decode_start_idx = 1048;           % [参数3] 从重采样后序列 x_sro 的第几个点开始作为 SSS 解调基准，也就是说SSS从此处开始
 
 % 原始采样率
 fs_source = 409.6e6;
@@ -25,7 +25,7 @@ cfo_hz   = 17556;    % 载波频偏 (Hz)
 
 % SSS 长度: 1个 OFDM 符号 = 1024 点 (假设无 CP 或与 pss_test.m 一致)
 N_fft = 1024;
-target_offset = 0; % 指定你想要测试的偏移量
+target_offset = 10; % 指定你想要测试的偏移量
 freq_shift_hz = 63e6; % 频谱归基带向左搬移 63MHz
 
 % 解调模式：true=解调全部1024子载波；false=仅解调有效子载波
