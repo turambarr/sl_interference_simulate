@@ -1,29 +1,77 @@
-% 独立脚本：绘制IQ信号功率谱密度(PSD)
+% 独立脚本：直接绘制IQ信号频谱（单次FFT）
 % 已知：Fs=409.6MHz，带宽=320MHz，中心频率=635MHz
 % 数据格式：int16 小端序，I/Q交织（纯数据文件，无文件头）
 
 clear; clc;
 
 %% 参数区（按需修改）
-inFile = 'test1.iq';
+inFile = 'sigtest6.iq';
 
 Fs = 409.6e6;      % 采样率 Hz
-Fc = 635e6;        % 中心频率 Hz
+Fc = -63.5e6;        % 中心频率 Hz
 showAbsoluteFreq = true; % true: 横轴显示 Fc+f；false: 显示基带频率 f
 
 startSample = 0;   % 从第几个“复采样点”开始（0-based）
-Nread = 2e6;       % 读取多少复采样点用于PSD（越大越平滑，但更慢）
+Nread = 5e6;       % 读取多少复采样点用于PSD（越大越平滑，但更慢）
+
+% 按“起止点”选取信号段（0-based，含 endPoint）
+useStartEndRange = false;  % true: 使用 startPoint/endPoint；false: 使用 startSample/Nread
+startPoint = 11562;            % 选段起点（复采样点）
+endPoint = 14472 ;       % 选段终点（复采样点，含该点）
 
 normalizeToUnit = true; % true: int16 / 32768 归一化到近似[-1,1]
 removeMean = false;      % true: 去直流
 
-% Welch参数
-segLen = 65536;     % 每段长度（复采样点数）
-overlapRatio = 0.5; % 重叠比例 [0,1)
-nfft = 1024;       % FFT点数（>=segLen）
+% 直接FFT参数
+nfft = 2^18;            % FFT点数（建议2的幂；可设[]表示自动=2^nextpow2(N)）
+useHannWindow = false;  % true: 加Hann窗；false: 矩形窗（更“直接”）
+
+%% 选段参数处理
+if useStartEndRange
+    if endPoint < startPoint
+        error('endPoint 必须 >= startPoint（当前 startPoint=%d, endPoint=%d）', startPoint, endPoint);
+    end
+    startSampleEff = round(startPoint);
+    NreadEff = round(endPoint - startPoint + 1);
+else
+    startSampleEff = round(startSample);
+    NreadEff = round(Nread);
+end
+
+if startSampleEff < 0
+    error('startSample/startPoint 必须 >= 0（当前=%d）', startSampleEff);
+end
+if NreadEff <= 0
+    error('Nread 或 (endPoint-startPoint+1) 必须 > 0（当前=%d）', NreadEff);
+end
+
+%% 文件长度与读区间检查（避免 fseek 失败）
+fInfo = dir(inFile);
+if isempty(fInfo)
+    error('文件不存在: %s', inFile);
+end
+bytesPerComplexSample = 4; % int16 I + int16 Q
+totalSamples = floor(fInfo.bytes / bytesPerComplexSample);
+if totalSamples <= 0
+    error('文件长度异常，无法读取复采样点: %s', inFile);
+end
+
+if startSampleEff >= totalSamples
+    error(['起始点超出文件范围：start=%d, total=%d。\n' ...
+           '请减小 startPoint/startSample（最大允许起点=%d）。'], ...
+          startSampleEff, totalSamples, totalSamples-1);
+end
+
+maxReadable = totalSamples - startSampleEff;
+if NreadEff > maxReadable
+    fprintf(['NOTE: 请求读取长度超出文件末尾，自动截断 Nread: %d -> %d ' ...
+             '(start=%d, total=%d)\n'], ...
+            NreadEff, maxReadable, startSampleEff, totalSamples);
+    NreadEff = maxReadable;
+end
 
 %% 读取数据
-[x, meta] = iq_read_int16_le(inFile, startSample, Nread);
+[x, meta] = iq_read_int16_le(inFile, startSampleEff, NreadEff);
 N = meta.numSamplesRead;
 if N == 0
     error('未读取到数据。');
@@ -37,18 +85,26 @@ if removeMean
     x = x - mean(x);
 end
 
-%% Welch PSD（自实现，避免工具箱依赖）
-% 若数据太短，自动调整 Welch 参数，避免 segLen>N 直接报错
-[segLenEff, nfftEff] = sanitize_welch_params(N, segLen, nfft);
-if segLenEff ~= segLen
-    fprintf('NOTE: segLen=%d > N=%d, auto set segLen=%d\n', segLen, N, segLenEff);
-end
-if nfftEff ~= nfft
-    fprintf('NOTE: nfft=%d < segLen=%d or too small, auto set nfft=%d\n', nfft, segLenEff, nfftEff);
+%% 直接FFT频谱
+if isempty(nfft) || nfft <= 0
+    nfftEff = 2^nextpow2(N);
+else
+    nfftEff = 2^nextpow2(round(nfft));
 end
 
-[psd, f] = welch_psd_centered(x, Fs, segLenEff, overlapRatio, nfftEff);
-psd_db = 10*log10(psd + eps);
+x = x(:);
+if useHannWindow
+    n = (0:N-1).';
+    w = 0.5 - 0.5*cos(2*pi*n/(N-1));
+else
+    w = ones(N,1);
+end
+
+X = fftshift(fft(x .* w, nfftEff));
+spec_db = 20*log10(abs(X) + eps);
+spec_db = spec_db - max(spec_db); % 归一化到峰值0 dB，便于观察
+
+f = ((-nfftEff/2):(nfftEff/2-1)).' * (Fs / nfftEff);
 
 if showAbsoluteFreq
     f_plot = (f + Fc) / 1e6; % MHz
@@ -59,93 +115,14 @@ else
 end
 
 %% 绘图
-figure('Name', sprintf('PSD: %s', inFile));
-plot(f_plot, psd_db, 'LineWidth', 1);
+figure('Name', sprintf('Spectrum: %s', inFile));
+plot(f_plot, spec_db, 'LineWidth', 1);
 grid on;
 xlabel(xlab);
-ylabel('PSD (dB/Hz)');
-title(sprintf('Welch PSD (start=%d, N=%d, seg=%d, nfft=%d)', startSample, N, segLenEff, nfftEff));
+ylabel('Magnitude (dB, normalized)');
+title(sprintf('Direct FFT Spectrum (start=%d, end=%d, N=%d, nfft=%d)', ...
+    startSampleEff, startSampleEff + N - 1, N, nfftEff));
 
 % 交互放大/查看
 zoom on;
 pan on;
-
-
-function [Pxx, f] = welch_psd_centered(x, Fs, segLen, overlapRatio, nfft)
-%WELCH_PSD_CENTERED 简单Welch PSD（双边、fftshift后中心化）
-% x: 复数序列
-% Fs: 采样率
-% segLen: 分段长度
-% overlapRatio: 重叠比例
-% nfft: FFT点数
-
-x = x(:);
-N = numel(x);
-
-if segLen < 2
-    error('segLen 必须 >= 2（当前 segLen=%d）', segLen);
-end
-
-if segLen <= 0 || nfft < segLen
-    error('segLen需要>0，且nfft需要>=segLen');
-end
-if overlapRatio < 0 || overlapRatio >= 1
-    error('overlapRatio 必须在 [0,1)');
-end
-
-hop = max(1, round(segLen * (1 - overlapRatio)));
-
-% Hann窗（工具箱无依赖）
-n = (0:segLen-1).';
-w = 0.5 - 0.5*cos(2*pi*n/(segLen-1));
-U = sum(w.^2); % 用于PSD归一化
-
-acc = zeros(nfft, 1);
-numSeg = 0;
-
-for start = 1:hop:(N - segLen + 1)
-    seg = x(start:start+segLen-1);
-    seg = seg .* w;
-
-    X = fft(seg, nfft);
-    acc = acc + (abs(X).^2);
-    numSeg = numSeg + 1;
-end
-
-if numSeg == 0
-    error('数据长度不足以形成一个分段：N=%d, segLen=%d', N, segLen);
-end
-
-% 平均功率谱，再换算为功率谱密度(每Hz)
-% 对应关系：Pxx = E{|X|^2} / (Fs * U)
-Pxx = (acc / numSeg) / (Fs * U);
-
-% 频率轴（中心化）
-Pxx = fftshift(Pxx);
-f = ((-nfft/2):(nfft/2-1)).' * (Fs / nfft);
-end
-
-function [segLenEff, nfftEff] = sanitize_welch_params(N, segLen, nfft)
-%SANITIZE_WELCH_PARAMS 让 Welch 参数适配当前数据长度 N
-% - 当 segLen > N 时，将 segLen 降到 2^floor(log2(N))（至少 256；若 N<256 则取 N）
-% - 保证 nfft >= segLen，且 nfft 为 2 的幂（便于 FFT）
-segLenEff = segLen;
-nfftEff = nfft;
-
-if N < segLenEff
-    if N >= 256
-        segLenEff = 2^floor(log2(N));
-    else
-        segLenEff = max(2, N);
-    end
-end
-
-if nfftEff < segLenEff
-    nfftEff = 2^nextpow2(segLenEff);
-end
-
-% 也把 nfft 拉到 2 的幂（如果用户填了非 2 幂）
-if nfftEff ~= 2^nextpow2(nfftEff)
-    nfftEff = 2^nextpow2(nfftEff);
-end
-end

@@ -7,9 +7,9 @@ clear; clc; close all;
 inFile = 'sigtest1.iq';
 
 % ===== 手动填写的 3 个关键参数 =====
-read_start_sample = 16386-874*2; % [参数1] 文件中开始读取的点（原始采样点）
+read_start_sample = 14472; % [参数1] 文件中开始读取的点（原始采样点）
 read_length = 6992*3+1000;                  % [参数2] 读取长度（原始采样点个数）
-sss_decode_start_idx = 1048;           % [参数3] 从重采样后序列 x_sro 的第几个点开始作为 SSS 解调基准
+sss_decode_start_idx = 1024+48;           % [参数3] 从重采样后序列 x_sro 的第几个点开始作为 SSS 解调基准
 
 fs_source = 409.6e6;
 fs_target = 60e6;
@@ -20,7 +20,7 @@ cfo_hz = 17556;
 N_fft = 1024;
 freq_shift_hz = 63e6;
 
-offset_range = 0:6;   % 遍历范围
+offset_range = -5:5;   % 遍历范围
 pause_each = true;      % 每个 offset 显示后是否暂停
 
 % 解调模式：true=解调全部1024子载波；false=仅解调有效子载波

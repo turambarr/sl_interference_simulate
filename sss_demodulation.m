@@ -5,12 +5,12 @@
 clear; clc; close all;
 
 %% 1. 参数设置
-inFile = 'sigtest62.iq';
+inFile = 'sigtest1.iq';
 
 % ===== 手动填写的 3 个关键参数 =====
-read_start_sample = 5648-874; % [参数1] 文件中开始读取的点（原始采样点）
+read_start_sample = 14472; % [参数1] 文件中开始读取的点（原始采样点）
 read_length = 6992*3+1000;                  % [参数2] 读取长度（原始采样点个数）
-sss_decode_start_idx = 1048;           % [参数3] 从重采样后序列 x_sro 的第几个点开始作为 SSS 解调基准，也就是说SSS从此处开始
+sss_decode_start_idx = 1024+48;           % [参数3] 从重采样后序列 x_sro 的第几个点开始作为 SSS 解调基准，也就是说SSS从此处开始
 
 % 原始采样率
 fs_source = 409.6e6;
@@ -21,12 +21,12 @@ fs_target = 60e6;
 % 请根据 gardner_farrow_timing_recovery.m 的输出回填这里
 % 示例值：
 sro_ppm  = 0;       % 采样率偏差 (ppm)
-cfo_hz   = 17556;    % 载波频偏 (Hz)
+cfo_hz   = -367188;    % 载波频偏 (Hz)
 
 % SSS 长度: 1个 OFDM 符号 = 1024 点 (假设无 CP 或与 pss_test.m 一致)
 N_fft = 1024;
 target_offset = 10; % 指定你想要测试的偏移量
-freq_shift_hz = 63e6; % 频谱归基带向左搬移 63MHz
+freq_shift_hz = 63.5e6; % 频谱归基带向左搬移 63MHz
 
 % 解调模式：true=解调全部1024子载波；false=仅解调有效子载波
 demod_all_subcarriers = true;

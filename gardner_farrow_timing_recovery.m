@@ -37,6 +37,11 @@ zeta        = 0.707;         % 阻尼系数
 sps_out     = 1;             % 最终输出每符号点数 (我们通常只需要1个最佳点)
 sps_loop    = 2;             % 环路工作在 2倍符号率 (Gardner 需要中间点)
 
+% 解调方式开关：
+% 'sdpsk_original' -> 保持原有 pi/2-BPSK/SDPSK 单比特差分解调
+% 'pi2_dpsk'       -> pi/2-DPSK 单比特差分解调（每符号1bit）
+modulation_mode = 'pi2_dpsk';
+
 %% 2. 读取原始数据
 fprintf('读取文件: %s (Start=%d, Len=%d)\n', inFile, startSample, readLen);
 [x_raw, ~] = iq_read_int16_le(inFile, startSample, readLen);
@@ -466,11 +471,10 @@ xlim([-2.5 2.5]); ylim([-2.5 2.5]);
 
 
 %% 9. [Final Step] Demodulation & m-sequence Extraction
-fprintf('\nStep 9: SDPSK Demodulation and m-sequence Extraction...\n');
+fprintf('\nStep 9: Demodulation & m-sequence Extraction...\n');
+fprintf('   Modulation mode = %s\n', modulation_mode);
 
-% 1. 获取同步后的符号流
-% 假设 y_costas 是已经锁定相位的符号 (1 Sample/Symbol)
-% 截取前 1024 个点 (8 blocks * 128 symbols)
+% 1) 获取同步后的符号流
 total_sym_needed = 8 * 128;
 if length(y_costas) < total_sym_needed
     warning('Not enough symbols tracked! Expected 1024, got %d', length(y_costas));
@@ -479,93 +483,103 @@ else
     y_sync = y_costas(1:total_sym_needed);
 end
 
-% 2. 差分检波 (Differential Demodulation)
-% SDPSK 信息包含在相邻符号的相位差中
-% d[k] = y[k] * conj(y[k-1])
-% 对于 pi/2-BPSK, 差分相位应该是 +pi/2 (Bit 0) 或 -pi/2 (Bit 1)
-% 即 d[k] 应该接近 +j 或 -j
-% 注意：如果是 m 序列结构，且块之间有反相 (++-+-+-+)，
-% 差分检波会自动消除块反相的影响 (因为 (-A)*conj(-B) = A*conj(B))
-% 所以 differential demod 后的比特流应该是 8 个完全相同的 m 序列 (除了边界点)
-
-% 为了保持长度一致，我们假定第一个符号通过某种方式参考，或者直接丢弃第一个差分
-% 这里为了对齐，我们直接计算 full differential
+% 差分向量
 y_diff_vec = y_sync(2:end) .* conj(y_sync(1:end-1));
 
-% 判决: Imaginary part > 0 -> 0, < 0 -> 1
-% (这取决于具体的映射规则，暂定 Im>0 为 0, Im<0 为 1)
-raw_soft_bits = -imag(y_diff_vec); % 正值为1，负值为0 (逻辑取反适应习惯)
-
-% 3. 规整化与合并 (Reshape & Combine)
-% --- [关键修改] 使用差分检波数据 ---
-% 优势：自动消除 Block 的正负反相影响 ((-A)*(-B)' = AB')
-% 我们直接使用 raw_soft_bits (Step 2 计算出的)
-% 注意：raw_soft_bits 长度为 1023 (因为丢了第一个)，需要补齐或截断
-% 为了整齐，我们丢弃每一块的第一个差分点？
-% 或者假设 raw_soft_bits 对应的是 1..1023
-% 没关系，先 reshape 看看
-target_len = 128 * 8;
-if length(raw_soft_bits) < target_len
-    raw_soft_bits(end+1 : target_len) = 0; % 补零
-else
-    raw_soft_bits = raw_soft_bits(1:target_len);
-end
-
-% 不再使用相干解调结果
-% soft_syms = real(y_bpsk); 
-
-% 4. 结构合并
-% 此时不需要再根据 ++-+-+-+ 手动翻转了，差分天然去除了符号翻转
 try
-    mat_syms = reshape(raw_soft_bits, 128, 8);
-    
-    % [已移除] 手动翻转代码
-    % mat_syms(:, 3) = -mat_syms(:, 3); ...
-    
-    % --- 验证：逐块输出 ---
-    % 将每一块独立解调并打印，方便肉眼比对一致性
-    fprintf('\n--- Individual Block Verification (Sign Corrected) ---\n');
-    for col = 1:8
-         col_soft = mat_syms(:, col);
-         col_bits = col_soft > 0;
-         col_hex = '';
-         for i = 1:4:128
-            chunk = col_bits(i:i+3);
-            val = chunk(1)*8 + chunk(2)*4 + chunk(3)*2 + chunk(4)*1;
-            col_hex = [col_hex, dec2hex(val)];
-         end
-         
-         % 简单的质量评估 (软比特的平均幅度，越大越确信)
-         avg_mag = mean(abs(col_soft));
-         fprintf('Block %d (Conf=%.2f): %s\n', col, avg_mag, col_hex);
-    end
-    fprintf('------------------------------------------------\n');
+    if strcmpi(modulation_mode, 'sdpsk_original')
+        % ===== 原有逻辑：单比特差分（保留不删） =====
+        raw_soft_bits = -imag(y_diff_vec); % 正值判1
 
-    % 合并 (求平均) - 提升 SNR
-    m_seq_soft = mean(mat_syms, 2);
-    
-    % 5. 判决与 Hex 输出
-    % 判决: >0 -> ? <0 -> ?
-    % 这一步有 180度 模糊度 (即全 0 变 全 1)。只能输出一种，另一种是其反码。
-    % 假设 >0 为 1
-    m_bits = m_seq_soft > 0;
-    
-    % 转 Hex
-    % 128 bits = 128/4 = 32 Hex digits
-    hex_str = '';
-    for i = 1:4:128
-        chunk = m_bits(i:i+3);
-        % Convert [b3 b2 b1 b0] to int
-        val = chunk(1)*8 + chunk(2)*4 + chunk(3)*2 + chunk(4)*1;
-        hex_str = [hex_str, dec2hex(val)];
+        target_len = 128 * 8;
+        if length(raw_soft_bits) < target_len
+            raw_soft_bits(end+1 : target_len) = 0;
+        else
+            raw_soft_bits = raw_soft_bits(1:target_len);
+        end
+
+        mat_syms = reshape(raw_soft_bits, 128, 8);
+
+        fprintf('\n--- Individual Block Verification (sdpsk_original) ---\n');
+        for col = 1:8
+            col_soft = mat_syms(:, col);
+            col_bits = col_soft > 0;
+            col_hex = '';
+            for i = 1:4:128
+                chunk = col_bits(i:i+3);
+                val = chunk(1)*8 + chunk(2)*4 + chunk(3)*2 + chunk(4)*1;
+                col_hex = [col_hex, dec2hex(val)]; %#ok<AGROW>
+            end
+            avg_mag = mean(abs(col_soft));
+            fprintf('Block %d (Conf=%.2f): %s\n', col, avg_mag, col_hex);
+        end
+        fprintf('------------------------------------------------\n');
+
+        m_seq_soft = mean(mat_syms, 2);
+        m_bits = m_seq_soft > 0;
+
+        hex_str = '';
+        for i = 1:4:128
+            chunk = m_bits(i:i+3);
+            val = chunk(1)*8 + chunk(2)*4 + chunk(3)*2 + chunk(4)*1;
+            hex_str = [hex_str, dec2hex(val)]; %#ok<AGROW>
+        end
+
+        fprintf('\n------------------------------------------------\n');
+        fprintf('Extracted m-sequence (Hex, sdpsk_original):\n');
+        fprintf('%s\n', hex_str);
+        fprintf('(Note: If incorrect, try inverting all bits: ~Hex)\n');
+        fprintf('------------------------------------------------\n');
+
+    elseif strcmpi(modulation_mode, 'pi2_dpsk')
+        % ===== pi/2-DPSK 逻辑：单比特差分判决 =====
+        % 对于二类差分相位（约 ±pi/2），按虚部符号做 1bit/symbol 判决
+        raw_soft_bits = imag(y_diff_vec);
+
+        target_len = 128 * 8;
+        if length(raw_soft_bits) < target_len
+            raw_soft_bits(end+1 : target_len) = 0;
+        else
+            raw_soft_bits = raw_soft_bits(1:target_len);
+        end
+
+        mat_syms = reshape(raw_soft_bits, 128, 8);
+
+        fprintf('\n--- Individual Block Verification (pi2_dpsk, 1bit/sym) ---\n');
+        for col = 1:8
+            col_soft = mat_syms(:, col);
+            col_bits = col_soft > 0;
+            col_hex = '';
+            for i = 1:4:128
+                chunk = col_bits(i:i+3);
+                val = chunk(1)*8 + chunk(2)*4 + chunk(3)*2 + chunk(4)*1;
+                col_hex = [col_hex, dec2hex(val)]; %#ok<AGROW>
+            end
+            conf = mean(abs(col_soft));
+            fprintf('Block %d (Conf=%.2f): %s\n', col, conf, col_hex);
+        end
+        fprintf('------------------------------------------------\n');
+
+        % 分块多数投票（按 bit 位）得到最终 128bit
+        voted_soft = mean(mat_syms, 2);
+        voted_bits = voted_soft > 0;
+        voted_hex = '';
+        for i = 1:4:128
+            chunk = voted_bits(i:i+3);
+            val = chunk(1)*8 + chunk(2)*4 + chunk(3)*2 + chunk(4)*1;
+            voted_hex = [voted_hex, dec2hex(val)]; %#ok<AGROW>
+        end
+
+        fprintf('\n------------------------------------------------\n');
+        fprintf('Extracted pi/2-DPSK sequence (Hex, 128 bits):\n');
+        fprintf('%s\n', voted_hex);
+        fprintf('(Note: If incorrect, try inverting all bits: ~Hex)\n');
+        fprintf('------------------------------------------------\n');
+
+    else
+        error('Unknown modulation_mode: %s', modulation_mode);
     end
-    
-    fprintf('\n------------------------------------------------\n');
-    fprintf('Extracted m-sequence (Hex):\n');
-    fprintf('%s\n', hex_str);
-    fprintf('(Note: If incorrect, try inverting all bits: ~Hex)\n');
-    fprintf('------------------------------------------------\n');
-    
+
 catch e
     fprintf('Error in structural decoding: %s\n', e.message);
 end

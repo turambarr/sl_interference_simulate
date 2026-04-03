@@ -4,7 +4,7 @@
 clear; clc;
 
 %% 参数区（按需修改）
-inFile = '20250912222305_part1.iq';
+inFile = 'sigtest1.iq';
 Fs = 409.6e6;      % 采样率 Hz
 
 startSample = 0;   % 从第几个“复采样点”开始（0-based）
