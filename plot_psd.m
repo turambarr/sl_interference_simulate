@@ -8,8 +8,6 @@ clear; clc;
 inFile = 'sigtest6.iq';
 
 Fs = 409.6e6;      % 采样率 Hz
-Fc = -63.5e6;        % 中心频率 Hz
-showAbsoluteFreq = true; % true: 横轴显示 Fc+f；false: 显示基带频率 f
 
 startSample = 0;   % 从第几个“复采样点”开始（0-based）
 Nread = 5e6;       % 读取多少复采样点用于PSD（越大越平滑，但更慢）
@@ -105,14 +103,8 @@ spec_db = 20*log10(abs(X) + eps);
 spec_db = spec_db - max(spec_db); % 归一化到峰值0 dB，便于观察
 
 f = ((-nfftEff/2):(nfftEff/2-1)).' * (Fs / nfftEff);
-
-if showAbsoluteFreq
-    f_plot = (f + Fc) / 1e6; % MHz
-    xlab = 'Frequency (MHz)';
-else
-    f_plot = f / 1e6; % MHz
-    xlab = 'Baseband Frequency (MHz)';
-end
+f_plot = f / 1e6; % MHz
+xlab = 'Baseband Frequency (MHz)';
 
 %% 绘图
 figure('Name', sprintf('Spectrum: %s', inFile));
