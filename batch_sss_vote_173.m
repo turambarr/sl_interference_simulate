@@ -15,24 +15,25 @@ file_prefix = 'sigtest';
 file_suffix = '.iq';
 file_range = 1:173;
 
-% 峰值检测参数（与 autocorr_test2_slide128.m 保持一致）
-peak_start_sample0 = 0;
-peak_num_samples = 50000;
-peak_W = 874;
-peak_D = 874;
-peak_min = 0.5;
+% 峰值检测参数（替换为 PSS 同步检测）
+sync_scan_start = 0;
+sync_scan_len = 20e6;
+min_peak_height = 50;
+peak_select_mode = 'first';
+input_format = 'auto';
+dat_header_bytes = 0;
 
 % 解调参数（与 sss_demodulation.m 对齐）
 read_length = 6992*3 + 1000;
-sss_decode_start_idx = 1048;
+sss_decode_start_idx = 1024 + 48;
 target_offset = 10;
 
 fs_source = 409.6e6;
 fs_target = 60e6;
 sro_ppm  = 0;
-cfo_hz   = 17556;
+cfo_hz   = -367188;
 N_fft = 1024;
-freq_shift_hz = 63e6;
+freq_shift_hz = 63.5e6;
 demod_all_subcarriers = true;
 decision_rotate_deg = 45;
 
@@ -62,20 +63,22 @@ for idx = file_range
     end
 
     try
-        % 1) 检测峰值 x 坐标
-        [peak_x, peak_y] = local_detect_peak_x(inFile, peak_start_sample0, peak_num_samples, peak_W, peak_D, peak_min);
-        read_start_sample = peak_x - peak_D;
+        % 1) 归一化匹配滤波同步找峰，直接获得 burst 起始点 (read_start_sample)
+        [read_start_sample, peak_mag] = local_detect_pss_start(inFile, sync_scan_start, sync_scan_len, ...
+            fs_source, min_peak_height, peak_select_mode, input_format, dat_header_bytes, 63e6);
 
         if read_start_sample < 0
             fprintf('[%3d] %-16s | invalid read_start=%d (skip)\n', idx, inFile, read_start_sample);
             continue;
         end
+        peak_x = read_start_sample; % 记录用
+        peak_y = peak_mag;
 
         % 2) 用该 read_start_sample 解调，取四个候选序列
         [hex_candidates, payload_label] = local_demod_four_candidates( ...
             inFile, read_start_sample, read_length, sss_decode_start_idx, target_offset, ...
             fs_source, fs_target, sro_ppm, cfo_hz, N_fft, freq_shift_hz, ...
-            demod_all_subcarriers, decision_rotate_deg);
+            demod_all_subcarriers, decision_rotate_deg, input_format, dat_header_bytes);
 
         for r = 1:4
             row = row + 1;
@@ -298,36 +301,88 @@ end
 fprintf('============================================================\n');
 
 %% ===== 本地函数 =====
-function [peak_x, peak_y] = local_detect_peak_x(inFile, startSample0, numSamples, W, D, peak_min)
-    [x, meta] = iq_read_int16_le(inFile, startSample0, local_num_samples(inFile, numSamples, startSample0));
-    L = meta.numSamplesRead;
-    if L <= D || L < W
-        error('peak detect: data too short (L=%d).', L);
+function [read_start_sample, peak_mag] = local_detect_pss_start(inFile, sync_scan_start, sync_scan_len, fs_source, min_peak_height, peak_select_mode, input_format, dat_header_bytes, fc)
+    % 生成本地 PSS 模板
+    fs_symbol = 60e6;
+    hex_str = 'BD3CD0148871751F84CED8C1BE32AC96';
+    hex_chars = char(hex_str);
+    bits = zeros(1, 128);
+    for i = 1:length(hex_chars)
+        bin_str = dec2bin(hex2dec(hex_chars(i)), 4);
+        bits((i-1)*4 + 1 : i*4) = bin_str - '0';
+    end
+    d_phi = (bits == 1) * (-pi/2) + (bits == 0) * (pi/2);
+    m_syms = exp(1j * cumsum(d_phi));
+    pss_base = [-m_syms, m_syms, m_syms, m_syms, m_syms, m_syms, m_syms, m_syms];
+    cp_syms = -pss_base(end - 47 : end);
+    pss_base_with_cp = [cp_syms, pss_base];
+
+    [P, Q] = rat(fs_source / fs_symbol);
+    pss_up = resample(pss_base_with_cp, P, Q);
+    t_local = (0:length(pss_up)-1) / fs_source;
+    pss_local = pss_up .* exp(1j * 2 * pi * fc * t_local);
+    pss_local = pss_local / max(abs(pss_local)); % 归一化
+
+    % 读取信号扫描区
+    fInfo = dir(inFile);
+    if isempty(fInfo)
+        error('FileNotFound: %s', inFile);
+    end
+    dataBytes = fInfo.bytes;
+    if strcmpi(input_format, 'dat') || (strcmpi(input_format, 'auto') && endsWith(lower(inFile), '.dat'))
+        dataBytes = max(0, fInfo.bytes - dat_header_bytes);
+    end
+    totalSamples = floor(dataBytes / 4);
+    scan_len = min(round(sync_scan_len), totalSamples - sync_scan_start);
+    
+    [x_sync, meta_sync] = read_iq_auto_local(inFile, sync_scan_start, scan_len, input_format, dat_header_bytes);
+    if meta_sync.numSamplesRead <= 0
+        error('ReadError');
     end
 
-    x = double(x) / 32768;
-    x = x - mean(x);
+    x_sync = double(x_sync(:));
+    x_sync = x_sync - mean(x_sync);
+    x_sync = x_sync / (mean(abs(x_sync)) + eps);
 
-    rx_delayed = x(1+D:end);
-    rx_base    = x(1:end-D);
+    % 归一化匹配滤波
+    h_matched = fliplr(conj(pss_local));
+    corr_out = filter(h_matched, 1, x_sync);
+    corr_mag_sq = abs(corr_out).^2;
 
-    P_metric = filter(ones(1, W), 1, conj(rx_base) .* rx_delayed);
-    R_base = filter(ones(1, W), 1, abs(rx_base).^2);
-    R_delayed = filter(ones(1, W), 1, abs(rx_delayed).^2);
+    E_local = sum(abs(pss_local).^2);
+    win_ones = ones(1, length(pss_local));
+    E_rx_moving = filter(win_ones, 1, abs(x_sync).^2);
+    E_rx_moving(E_rx_moving < 1e-10) = 1e-10;
 
-    M_real = real(P_metric ./ (sqrt(R_base .* R_delayed) + 1e-10));
-    M_real_full = [M_real; zeros(D,1)];
-    t_axis = (0:length(x)-1).' + startSample0;
+    corr_norm_pct = (corr_mag_sq ./ (E_local .* E_rx_moving)) * 100;
+    min_peak_dist = length(pss_local);
+    [pks, locs] = findpeaks(corr_norm_pct, 'MinPeakHeight', min_peak_height, 'MinPeakDistance', min_peak_dist);
 
-    [peak_x, peak_y] = local_pick_peak(t_axis, M_real_full, peak_min);
+    if isempty(locs)
+        % 如果没有高于阈值的，直接取全场最大值兜底（抗极端恶劣偏差）
+        [pks, locs] = max(corr_norm_pct);
+    end
+
+    L_pss = length(pss_local);
+    start_pos_global = sync_scan_start + (locs - 1) - (L_pss - 1);
+
+    if strcmpi(peak_select_mode, 'strongest')
+        [~, idx_best] = max(pks);
+    else
+        % default 'first'
+        idx_best = 1;
+    end
+
+    read_start_sample = start_pos_global(idx_best);
+    peak_mag = pks(idx_best);
 end
 
 function [hex_candidates, payload_label] = local_demod_four_candidates( ...
     inFile, read_start_sample, read_length, sss_decode_start_idx, target_offset, ...
     fs_source, fs_target, sro_ppm, cfo_hz, N_fft, freq_shift_hz, ...
-    demod_all_subcarriers, decision_rotate_deg)
+    demod_all_subcarriers, decision_rotate_deg, input_format, dat_header_bytes)
 
-    [x_raw, ~] = iq_read_int16_le(inFile, read_start_sample, read_length);
+    [x_raw, ~] = read_iq_auto_local(inFile, read_start_sample, read_length, input_format, dat_header_bytes);
     x_raw = double(x_raw);
     x_raw = x_raw - mean(x_raw);
     x_raw = x_raw / mean(abs(x_raw));
@@ -455,22 +510,57 @@ function hex_str = local_bits_to_hex(bits)
     end
 end
 
-function [peak_x, peak_y] = local_pick_peak(t_axis, y, peak_min)
-    n = length(y);
-    if n < 3
-        [peak_y, idx] = max(y);
-        peak_x = t_axis(idx);
+function [x_out, meta_out] = read_iq_auto_local(inFile, st_sample, num_samples, format_mode, dat_hd_bytes)
+    % 辅助读取：自动适配 .iq（无头）或 .dat（可能有头）
+    if strcmpi(format_mode, 'auto')
+        if endsWith(lower(inFile), '.dat')
+            fmt = 'dat';
+        else
+            fmt = 'iq';
+        end
+    else
+        fmt = format_mode;
+    end
+
+    meta_out = struct('numSamplesRead', 0);
+    x_out = [];
+
+    fid = fopen(inFile, 'rb');
+    if fid == -1
         return;
     end
-    cand = find(y(2:end-1) > y(1:end-2) & y(2:end-1) >= y(3:end)) + 1;
-    cand = cand(y(cand) >= peak_min);
-    if isempty(cand)
-        [peak_y, idx] = max(y);
+
+    if strcmpi(fmt, 'dat')
+        if dat_hd_bytes > 0
+            fseek(fid, dat_hd_bytes, 'bof');
+        end
+        bytes_per_cplx = 4; % 16-bit I + 16-bit Q
+        offset_bytes = st_sample * bytes_per_cplx;
+        fseek(fid, offset_bytes, 'cof');
+        
+        N_read = num_samples * 2;
+        data = fread(fid, N_read, 'int16=>double');
+        fclose(fid);
+        
+        if isempty(data)
+            return;
+        end
+        % 补齐偶数
+        if mod(length(data), 2) == 1
+            data = [data; 0];
+        end
+        I = data(1:2:end);
+        Q = data(2:2:end);
+        x_out = I + 1j * Q;
+        meta_out.numSamplesRead = length(x_out);
+        
     else
-        [peak_y, iBest] = max(y(cand));
-        idx = cand(iBest);
+        % iq
+        fclose(fid);
+        [x_cplx, meta] = iq_read_int16_le(inFile, st_sample, num_samples);
+        x_out = double(x_cplx);
+        meta_out = meta;
     end
-    peak_x = t_axis(idx);
 end
 
 function d = local_hex_dist(a, b)

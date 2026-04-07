@@ -8,7 +8,7 @@ clear; clc; close all;
 inFile = 'sigtest1.iq';
 
 % ===== 手动填写的 3 个关键参数 =====
-read_start_sample = 14472; % [参数1] 文件中开始读取的点（原始采样点）
+read_start_sample = 14471; % [参数1] 文件中开始读取的点（原始采样点）
 read_length = 6992*3+1000;                  % [参数2] 读取长度（原始采样点个数）
 sss_decode_start_idx = 1024+48;           % [参数3] 从重采样后序列 x_sro 的第几个点开始作为 SSS 解调基准，也就是说SSS从此处开始
 
@@ -33,6 +33,18 @@ demod_all_subcarriers = true;
 
 % 判决前整体旋转角（用于把落在坐标轴上的点转回4QAM象限中心）
 decision_rotate_deg = 45;
+
+% ===== BER 计算参数 =====
+enable_ber_eval = true;
+% 预设正确值（4组）
+ber_ref_hex_list = {
+    '80C46B5267759FD6505644FC1F0052124876B17F9FA9EA13D3C2A8E274700BE9F511FBCDF1B237B1E6E46FB1A80A762952FCA4FCDB45612E5C6641BC200043442D23B538172067919D89A3D640557B004A5507460C3DC60DEDE45BB18D5FC9D5E944683265F591D6585671A960FF43002E13B478182063925276497C15006A10178064119F89AE831FAABF442C33B9F812205B9272769C29EAFC2E57F1E270347E7388504C853A85EF97AA0E79A3FDD5CC122832DE4EA2E7191A815164CC8CE96EEF4BC01B139D2E5D75B280250380B83D208AC7BD8ACD3A263D2B583218CAA1EB37998E6EF65A2982FFCE5624BB8FCD6F5F4483E3EC5384ED75493BE9CD690B', ... % Ref-1
+    '159DC2F4CEEF3ABCF5FCDDA97A55F474D1EC27EA3A038076B6940184EDE55283AF77A29BA7246E278C8DCA270150EC43F4A90DA9B2DFC748F9CCD7294555D6DD4B462F617E45CE373B1306BCD5FFE255D0FF5EDC596B9C5B8B8DF2271BFA93BF83DDC164CFAF37BCF1FCE703C5AAD65548762DE17145C634F4ECD3E97F55C0757E15CD773A1308167A002ADD496623A17445F234E4EC394380A948FEA784E56DE8E611F5D91F601F8A3E0058E306ABBF99744164B8D8048E737017F7CD991983C88AD29572763B48FBEF24154F5615216B45109E2B109B604C6B42F164719007826E3318C8ACF04314AA98FC4D221A9BCAFADD168689F61D8BEFD362839AC352', ... % Ref-2
+    '7F3B94AD988A6029AFA9BB03E0FFADEDB7894E80605615EC2C3D571D8B8FF4160AEE04320E4DC84E191B904E57F589D6AD035B0324BA9ED1A399BE43DFFFBCBBD2DC4AC7E8DF986E62765C29BFAA84FFB5AAF8B9F3C239F2121BA44E72A0362A16BB97CD9A0A6E29A7A98E569F00BCFFD1EC4B87E7DF9C6DAD89B683EAFF95EFE87F9BEE6076517CE05540BBD3CC4607EDDFA46D8D8963D61503D1A80E1D8FCB818C77AFB37AC57A106855F1865C022A33EDD7CD21B15D18E6E57EAE9B3373169110B43FE4EC62D1A28A4D7FDAFC7F47C2DF7538427532C5D9C2D4A7CDE7355E14C866719109A5D67D0031A9DB44703290A0BB7C1C13AC7B128AB6C4163096F4', ... % Ref-3
+    'EA623D0B3110C5430A03225685AA0B8B2E13D815C5FC7F89496BFE7B121AAD7C50885D6458DB91D8737235D8FEAF13BC0B56F2564D2038B7063328D6BAAA2922B4B9D09E81BA31C8C4ECF9432A001DAA2F00A123A69463A474720DD8E4056C407C223E9B3050C8430E0318FC3A5529AAB789D21E8EBA39CB0B132C1680AA3F8A81EA3288C5ECF7E985FFD522B699DC5E8BBA0DCB1B13C6BC7F56B701587B1A921719EE0A26E09FE075C1FFA71CF95440668BBE9B4727FB718C8FE8083266E67C37752D6A8D89C4B70410DBEAB0A9EADE94BAEF61D4EF649FB394BD0E9B8E6FF87D91CCE737530FBCEB556703B2DDE564350522E9797609E274102C9D7C643CAD'  ... % Ref-4
+};
+unstable_bit_positions = [];      % 1-based bit索引
+unstable_nibble_positions = [1, 2, 3, 4, 257, 510, 511, 512];   % 重点标记的零子载波
 
 %% 2. 读取原始数据
 fprintf('Loading file: %s from %d, len %d...\n', inFile, read_start_sample, read_length);
@@ -289,5 +301,97 @@ for r = 1:4
 end
 fprintf('============================================================\n');
 
+%% 8. BER 评估（与4组预设正确值对比，剔除0子载波不稳位）
+if enable_ber_eval
+    ref_filled = cellfun(@(s) ~isempty(strtrim(s)), ber_ref_hex_list);
+    if any(ref_filled)
+        nCand = numel(hex_candidates);
+        nRef = numel(ber_ref_hex_list);
+        ber_mat = nan(nCand, nRef);
+
+        fprintf('\n================ BER EVALUATION ================\n');
+        fprintf('Unstable drop: bit_pos=%d, nibble_pos=%d\n', ...
+            numel(unstable_bit_positions), numel(unstable_nibble_positions));
+
+        for i = 1:nCand
+            bits_est = demod_bits_candidates{i};
+            for j = 1:nRef
+                ref_hex = strtrim(ber_ref_hex_list{j});
+                if isempty(ref_hex)
+                    continue;
+                end
+                
+                % 本地函数将hex转换为bits
+                bits_ref = hex_to_bits_local(ref_hex);
+                nUse = min(length(bits_est), length(bits_ref));
+                if nUse <= 0
+                    continue;
+                end
+
+                keep_mask = true(nUse,1);
+
+                % 剔除不稳 bit 位
+                ub = unstable_bit_positions(:);
+                ub = ub(ub >= 1 & ub <= nUse);
+                keep_mask(ub) = false;
+
+                % 剔除不稳 nibble 位（每个hex字符对应4bit）
+                un = unstable_nibble_positions(:);
+                un = un(un >= 1);
+                for k = 1:numel(un)
+                    b1 = 4*(un(k)-1) + 1;
+                    b2 = 4*un(k);
+                    if b1 > nUse
+                        continue;
+                    end
+                    b2 = min(b2, nUse);
+                    keep_mask(b1:b2) = false;
+                end
+
+                bits_e = bits_est(1:nUse);
+                bits_r = bits_ref(1:nUse);
+                nKeep = nnz(keep_mask);
+                if nKeep <= 0
+                    continue;
+                end
+
+                err = nnz(bits_e(keep_mask) ~= bits_r(keep_mask));
+                ber_mat(i,j) = err / nKeep;
+
+                fprintf('Cand[%3d deg] vs Ref[%d]: BER=%.6g (err=%d/%d)\n', ...
+                    rot_angles_deg(i), j, ber_mat(i,j), err, nKeep);
+            end
+        end
+
+        % 打印每个候选的最优匹配参考
+        for i = 1:nCand
+            row = ber_mat(i,:);
+            if all(isnan(row))
+                continue;
+            end
+            [v, idx] = min(row);
+            fprintf('Best for Cand[%3d deg] -> Ref[%d], BER=%.6g\n', rot_angles_deg(i), idx, v);
+        end
+        fprintf('================================================\n');
+    end
+end
+
 fprintf('\n解调流程结束。\n');
+
+%% ===== 辅助函数 =====
+function bits_out = hex_to_bits_local(hex_str)
+    % 辅助函数：将一行HEX字符串解析回0/1列向量
+    len_hex = length(hex_str);
+    bits_out = zeros(len_hex * 4, 1);
+    
+    for idx_char = 1:len_hex
+        val = hex2dec(hex_str(idx_char));
+        bin_str = dec2bin(val, 4);
+        bidx = (idx_char-1)*4 + 1;
+        bits_out(bidx)   = bin_str(1) - '0';
+        bits_out(bidx+1) = bin_str(2) - '0';
+        bits_out(bidx+2) = bin_str(3) - '0';
+        bits_out(bidx+3) = bin_str(4) - '0';
+    end
+end
 

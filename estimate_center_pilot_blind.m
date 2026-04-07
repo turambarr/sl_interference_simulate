@@ -9,7 +9,7 @@
 clear; clc; close all;
 
 %% ======================= 参数区 =======================
-inFile = 'sigtest58.iq';
+inFile = 'sigtest1.iq';
 Fs = 409.6e6;
 
 startSample = 0;          % 0-based

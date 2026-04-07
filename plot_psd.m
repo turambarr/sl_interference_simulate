@@ -5,7 +5,7 @@
 clear; clc;
 
 %% 参数区（按需修改）
-inFile = 'sigtest6.iq';
+inFile = 'sigtest1.iq';
 
 Fs = 409.6e6;      % 采样率 Hz
 
