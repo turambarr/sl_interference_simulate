@@ -7,7 +7,10 @@
 clear; clc; close all;
 
 %% ===================== 0. 全局参数 =====================
-inFile = 'target_signal_multiframe_jammed_-3dB.dat';
+% inFile = 'target_signal_multiframe_jammed_3dB.dat';
+% inFile = 'sigtest2.iq';
+% inFile = 'target_signal_jammed_-3dB.dat';
+inFile = "cp_interference_3dB.iq";
 
 % 输入文件读取设置：
 % input_format = 'auto' | 'iq' | 'dat'
@@ -183,35 +186,60 @@ corr_norm_pct = (corr_mag_sq ./ (E_local .* E_rx_moving)) * 100;
 min_peak_dist = length(pss_local);
 [pks, locs] = findpeaks(corr_norm_pct, 'MinPeakHeight', min_peak_height, 'MinPeakDistance', min_peak_dist);
 
-if isempty(locs)
-    error('未检测到有效同步峰。请降低 min_peak_height 或检查输入信号。');
-end
-
+read_start_sample_list = [];
+mode_names = {};
 L_pss = length(pss_local);
-end_pos_global = sync_scan_start + (locs - 1);
-start_pos_global = end_pos_global - (L_pss - 1);
 
-fprintf('  检测到 %d 个峰：\n', length(locs));
-for i = 1:length(locs)
-    fprintf('    Peak %02d: %.2f%%, 末端=%d, 起始=%d\n', i, pks(i), end_pos_global(i), start_pos_global(i));
+if isempty(locs)
+    figure('Name', 'Debug: Sync Peak Output', 'Position', [200,200,900,400]);
+    plot(corr_norm_pct, 'b');
+    yline(min_peak_height, 'r--', 'Threshold');
+    title('Debug: 归一化匹配度度全景图 (未检测到峰值)');
+    xlabel('Samples'); ylabel('Correlation (%)');
+    grid on; axis tight;
+    drawnow;
+    
+    fprintf('\n[警告] 未检测到大于 %d%% 的有效同步峰。已绘制扫描段度量图。\n', min_peak_height);
+    fprintf('将执行两种降级解调方案：\n');
+    read_start_sample_list(1) = sync_scan_start;
+    mode_names{1} = '降级方案 1: 扫描起始点当作起点';
+    
+    [~, max_idx] = max(corr_norm_pct);
+    fallback_pos2 = sync_scan_start + (max_idx - 1) - (L_pss - 1);
+    read_start_sample_list(2) = max(0, fallback_pos2);
+    mode_names{2} = '降级方案 2: 最大峰位置当作起点';
+    
+    fprintf('  1) 起始点=%d (%s)\n', read_start_sample_list(1), mode_names{1});
+    fprintf('  2) 起始点=%d (%s)\n', read_start_sample_list(2), mode_names{2});
+else
+    end_pos_global = sync_scan_start + (locs - 1);
+    start_pos_global = end_pos_global - (L_pss - 1);
+
+    fprintf('  检测到 %d 个峰：\n', length(locs));
+    for i = 1:length(locs)
+        fprintf('    Peak %02d: %.2f%%, 末端=%d, 起始=%d\n', i, pks(i), end_pos_global(i), start_pos_global(i));
+    end
+
+    switch lower(peak_select_mode)
+        case 'first'
+            pick_idx = 1;
+        case 'strongest'
+            [~, pick_idx] = max(pks);
+        otherwise
+            error('未知 peak_select_mode: %s', peak_select_mode);
+    end
+
+    read_start_sample = start_pos_global(pick_idx);
+    if read_start_sample < 0
+        error('选中的起始点为负数: %d（请检查峰选择）', read_start_sample);
+    end
+
+    fprintf('\n>>> 选中峰 #%d, 匹配度 %.2f%%\n', pick_idx, pks(pick_idx));
+    fprintf('>>> 自动设置 read_start_sample = %d\n', read_start_sample);
+    
+    read_start_sample_list(1) = read_start_sample;
+    mode_names{1} = '正常同步峰起点';
 end
-
-switch lower(peak_select_mode)
-    case 'first'
-        pick_idx = 1;
-    case 'strongest'
-        [~, pick_idx] = max(pks);
-    otherwise
-        error('未知 peak_select_mode: %s', peak_select_mode);
-end
-
-read_start_sample = start_pos_global(pick_idx);
-if read_start_sample < 0
-    error('选中的起始点为负数: %d（请检查峰选择）', read_start_sample);
-end
-
-fprintf('\n>>> 选中峰 #%d, 匹配度 %.2f%%\n', pick_idx, pks(pick_idx));
-fprintf('>>> 自动设置 read_start_sample = %d\n', read_start_sample);
 
 % 完整时域图（同步扫描区）
 if plot_full_time_domain
@@ -224,13 +252,17 @@ if plot_full_time_domain
     hold on; grid on;
 
     % 标注所有检测峰（起始/末端）
-    for ii = 1:length(start_pos_global)
-        xline(start_pos_global(ii), 'b--', 'LineWidth', 0.8);
-        xline(end_pos_global(ii), 'r--', 'LineWidth', 0.8);
+    if exist('start_pos_global', 'var')
+        for ii = 1:length(start_pos_global)
+            xline(start_pos_global(ii), 'b--', 'LineWidth', 0.8);
+            xline(end_pos_global(ii), 'r--', 'LineWidth', 0.8);
+        end
     end
 
-    % 标注最终选中起始点
-    xline(read_start_sample, 'g-', 'LineWidth', 1.8);
+    % 标注最终选中/降级测试起始点
+    for r_idx = 1:length(read_start_sample_list)
+        xline(read_start_sample_list(r_idx), 'g-', 'LineWidth', 1.8);
+    end
 
     xlabel('复采样点索引 (Complex Sample Index)');
     ylabel('|x| (Normalized Amplitude)');
@@ -246,11 +278,18 @@ plot(sync_scan_start + (locs - 1), pks, 'r*', 'MarkerSize', 8, 'LineWidth', 1.2)
 yline(min_peak_height, 'g--', 'LineWidth', 1.2);
 xlabel('复采样点索引 (Complex Sample Index)');
 ylabel('归一化相关系数 Match (%)');
-title(sprintf('Sync Peaks (detected=%d, selected start=%d)', length(locs), read_start_sample));
+title(sprintf('Sync Peaks (detected=%d, starts to test=%d)', length(locs), length(read_start_sample_list)));
 
-%% ===================== 3. SSS 解调（使用自动起始点） =====================
-fprintf('\nStep 3: 使用自动 read_start_sample 进行 SSS 解调...\n');
-fprintf('Loading file: %s from %d, len %d...\n', inFile, read_start_sample, read_length);
+%% ===================== 3. SSS 解调（支持多模式/降级方案） =====================
+for run_idx = 1:length(read_start_sample_list)
+    read_start_sample = read_start_sample_list(run_idx);
+    current_mode = mode_names{run_idx};
+    
+    fprintf('\n========================================================================\n');
+    fprintf('Step 3: 使用 [%s] 起始点 (read_start_sample=%d) 进行 SSS 解调...\n', current_mode, read_start_sample);
+    fprintf('========================================================================\n');
+    
+    fprintf('Loading file: %s from %d, len %d...\n', inFile, read_start_sample, read_length);
 [x_raw, ~] = read_iq_auto_local(inFile, read_start_sample, read_length, input_format, dat_header_bytes);
 x_raw = double(x_raw);
 
@@ -516,6 +555,7 @@ if enable_ber_eval
         fprintf('================================================\n');
     end
 end
+end % end for run_idx
 
 function [f_center_pilot_hz, info] = estimate_center_pilot_blind_from_signal( ...
     x, Fs, target_bw_hz, bw_tol_ratio, occ_bg_win_hz, occ_smooth_hz, occ_thresh_db, min_component_bw_hz, ...
