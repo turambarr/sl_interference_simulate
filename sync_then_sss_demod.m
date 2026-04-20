@@ -10,7 +10,7 @@ clear; clc; close all;
 % inFile = 'target_signal_multiframe_jammed_3dB.dat';
 % inFile = 'sigtest2.iq';
 % inFile = 'target_signal_jammed_-3dB.dat';
-inFile = "cp_interference_3dB.iq";
+inFile = "sigtest1.iq";
 
 % 输入文件读取设置：
 % input_format = 'auto' | 'iq' | 'dat'
@@ -41,7 +41,7 @@ center_nominal_hz = 63.5e6; % 名义中心频率（用于显示/对比）
 % 频率补偿模式：
 % 'manual'      -> 使用手填 center + cfo
 % 'blind_pilot' -> 自动盲估“中心单载波频率”，一步补偿（cfo 置0）
-freq_comp_mode = 'manual';
+freq_comp_mode = 'blind_pilot';
 
 % 手动模式参数
 freq_shift_hz_manual = 63.5e6;   % DDC 中心频率
@@ -55,7 +55,7 @@ blind_target_bw_hz = 60e6;
 blind_bw_tol_ratio = 0.35;
 blind_occ_bg_win_hz = 2.0e6;
 blind_occ_smooth_hz = 1.2e6;
-blind_occ_thresh_db = 5.5;
+blind_occ_thresh_db = 12.0; % [修改] 从5.5提高到12，确保能切出信号的高原台阶，避开整个底噪带
 blind_min_component_bw_hz = 20e6;
 blind_max_expected_cfo_hz = 6e6;
 blind_pilot_bg_win_hz = 0.9e6;
@@ -578,9 +578,10 @@ if N < segLen * 2
 end
 
 [P_med, ~, f] = robust_welch_psd_local(x, Fs, segLen, overlapRatio, nfft);
-Pdb = 10*log10(P_med + eps);
+% 注意：此时 P_med 已经是对齐 plot_psd.m 的单量纲振幅比值了
+Pdb = 20*log10(P_med + eps);
 
-bin_hz = Fs / nfft;
+bin_hz = Fs / length(f);
 occ_bg_bins = make_odd_local(max(9, round(occ_bg_win_hz / bin_hz)));
 occ_sm_bins = make_odd_local(max(5, round(occ_smooth_hz / bin_hz)));
 
@@ -678,92 +679,50 @@ info.refine_used = refine_used;
 end
 
 function [P_med, P_mean, f] = robust_welch_psd_local(x, Fs, segLen, overlapRatio, nfft)
+% 完全抛弃 Welch 分段 PSD，直接1:1复刻 plot_psd.m 暴力大点数FFT，赚取单音极大的相干增益
 x = x(:);
 N = length(x);
-hop = max(1, round(segLen*(1-overlapRatio)));
-if N < segLen
-    error('N(%d) < segLen(%d)', N, segLen);
-end
-nSeg = floor((N-segLen)/hop) + 1;
-P = zeros(nfft, nSeg);
-n = (0:segLen-1).';
-w = 0.5 - 0.5*cos(2*pi*n/(segLen-1));
-U = sum(w.^2);
-c = 0;
-for s = 1:hop:(N-segLen+1)
-    c = c + 1;
-    seg = x(s:s+segLen-1).*w;
-    X = fft(seg, nfft);
-    Px = (abs(X).^2)/(Fs*U);
-    P(:,c) = fftshift(Px);
-end
-P_med = median(P, 2);
-P_mean = mean(P, 2);
-f = ((-nfft/2):(nfft/2-1)).' * (Fs/nfft);
+
+% 直接取 2^18 或全长（看齐 plot_psd.m 的 nfftEff = 2^nextpow2(N)）
+nfftEff = 2^nextpow2(N);
+w = ones(N, 1);
+
+X = fftshift(fft(x .* w, nfftEff));
+% 直接用振幅幅度计算dB（不除以 Fs，刻意让单音靠着 N 的成倍暴涨拔高），与 plot_psd.m 完全一致
+P_out = abs(X); 
+P_out = (P_out / max(P_out)); % 归一化，使得那根最强的针顶格
+
+% 强制把这全尺寸频谱输送出去
+P_med = P_out;
+P_mean = P_out;
+f = ((-nfftEff/2):(nfftEff/2-1)).' * (Fs / nfftEff);
 end
 
 function [f_coarse, f_subbin, info] = detect_center_pilot_once_local(Pdb, f, f_center, search_half_hz, bg_win_hz, prom_min_db, width_ref_hz)
 df = abs(f(2)-f(1));
 idx = abs(f - f_center) <= search_half_hz;
-if nnz(idx) < 9
-    error('中心搜索窗口过窄或频轴异常。');
-end
-f_roi = f(idx);
+f_roi = f(idx); 
 y = Pdb(idx);
-bg_bins = make_odd_local(max(9, round(bg_win_hz/df)));
-y_bg = movmedian(y, bg_bins);
-r = y - y_bg;
 
-pk = false(size(r));
-pk(2:end-1) = (r(2:end-1) > r(1:end-2)) & (r(2:end-1) >= r(3:end));
-idx_pk = find(pk);
-if isempty(idx_pk)
-    error('中心窗口内未发现局部峰。');
+if isempty(y)
+    error('搜索区间为空。');
 end
 
-prom = r(idx_pk);
-widths = zeros(size(idx_pk));
-dist_center = abs(f_roi(idx_pk) - f_center);
-for i = 1:length(idx_pk)
-    k = idx_pk(i);
-    halfv = max(0, 0.5*prom(i));
-    L = k; while L > 1 && r(L) > halfv, L = L - 1; end
-    R = k; while R < length(r) && r(R) > halfv, R = R + 1; end
-    widths(i) = (R - L + 1) * df;
-end
-
-prom_n = prom / 10;
-width_n = widths / max(width_ref_hz, df);
-dist_n = dist_center / max(search_half_hz, df);
-score = 2.0*prom_n - 0.6*width_n - 1.2*dist_n;
-
-valid = prom >= prom_min_db;
-if ~any(valid)
-    % 弱峰场景：退化使用最高分
-    [~, im_all] = max(score);
-    ksel = idx_pk(im_all);
-else
-    idx_cand = find(valid);
-    [~, im] = max(score(idx_cand));
-    ksel = idx_pk(idx_cand(im));
-end
-
+% 【核心修改】：去掉了所有鲁棒性的多维度记分（抛弃对比背景底噪和峰宽），
+% 直接暴力寻找指定带宽窗口内，PSD 幅值最高的那一根单音主峰！
+[max_val, ksel] = max(y);
 f_coarse = f_roi(ksel);
+
+% 保留三点抛物线插值，用于在离散频率格点之间再提取一步小数精确度
 if ksel <= 1 || ksel >= length(y)
     f_subbin = f_coarse;
 else
     y1 = y(ksel-1); y2 = y(ksel); y3 = y(ksel+1);
     den = (y1 - 2*y2 + y3);
-    if abs(den) < 1e-12
-        delta = 0;
-    else
-        delta = 0.5 * (y1 - y3) / den;
-        delta = max(min(delta, 1), -1);
-    end
-    f_subbin = f_roi(ksel) + delta * df;
+    delta = (abs(den)<1e-12)*0 + (abs(den)>=1e-12)*(0.5*(y1-y3)/den);
+    f_subbin = f_roi(ksel) + max(min(delta, 1), -1) * df;
 end
-
-info = struct('prom_db', r(ksel), 'width_hz', widths(max(1,find(idx_pk==ksel,1))), 'score', max(score));
+info = struct('prom_db', max_val, 'width_hz', 0, 'score', max_val);
 end
 
 function comps = mask_to_components_local(mask)

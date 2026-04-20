@@ -1,0 +1,4 @@
+Total Valid Files: 173
+Total Common Bits (4QAM): 0 / 32
+
+Index	BitValue
