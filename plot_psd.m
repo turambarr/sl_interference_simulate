@@ -5,7 +5,7 @@
 clear; clc;
 
 %% 参数区（按需修改）
-inFile = 'sigtest1.iq';
+inFile = 'cp_interference_0dB.iq';
 
 Fs = 409.6e6;      % 采样率 Hz
 

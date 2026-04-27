@@ -1,8 +1,8 @@
-% 对 8e6.iq 加 SSS CP干扰的独立脚本
+% 对 OFDM 信号加 SSS CP干扰的独立脚本
 clear; clc; close all;
 
-inFile = '8e6.iq';
-outFile = 'cp_interference_0dB.iq';
+inFile = '20250912222305_part1.iq';
+outFile = 'ofdmcp_interference_3dB.iq';
 
 fs_source = 409.6e6;       
 fs_target = 60e6;          
@@ -12,7 +12,7 @@ center_nominal_hz = 63.5e6;
 cfo_hz = -367188; 
 freq_shift_hz = center_nominal_hz + cfo_hz; % 实频：63.132812 MHz
 
-JSR_dB = 0;               
+JSR_dB = 3;               
 
 N = 1024;    
 L = 48;      
@@ -79,8 +79,15 @@ pss_local = pss_local / max(abs(pss_local));
 %% 互相关寻找所有的 PSS 同步峰 (严格复刻 `sync_then_sss_demod.m` 中的归一化匹配)
 fprintf('Reading %s...\n', inFile);
 fid = fopen(inFile, 'rb');
-raw = fread(fid, inf, 'int16');
+
+% ===================== 控制文件大小 =====================
+% 输出格式是交织 int16，每个复采样点 I+Q 占用 4 byte
+% 要使得输出在 54 ~ 55 MB (取中值为 54.5MB = 57,147,392 bytes)
+% 则读取的样本数应该限制在： 57,147,392 / 4 = 14,286,848 个样本
+target_samples = 14286848; 
+raw = fread(fid, target_samples * 2, 'int16');
 fclose(fid);
+
 x_iq = raw(1:2:end) + 1j * raw(2:2:end);
 x_raw = double(x_iq);
 x_sync = x_raw - mean(x_raw);

@@ -13,6 +13,11 @@ numSamples = 50000;    % [] 表示读到文件尾（如果文件很大，建议�
 normalizeToUnit = true; % int16/32768
 removeMean = true;      % 去直流
 
+% 频谱搬移参数
+Fs = 409.6e6;   % 系统的采样率 (Hz)
+fc = 63.5e6;    % 目标信号的相对中心频率 (Hz, 先假设它在正频 63.5M)
+doFreqShift = true; % 是否执行基带搬移
+
 % W = 871;                % 窗长（固定 128）
 D = 874;
 W = 874;
@@ -28,6 +33,12 @@ if normalizeToUnit
 end
 if removeMean
     x = x - mean(x);
+end
+
+if doFreqShift
+    % 将 +63.5MHz 的目标信号搬移到 0MHz 基带 (乘 exp(-j 2*pi*fc*t))
+    t_idx = (0 : length(x)-1).';
+    x = x .* exp(-1i * 2 * pi * fc / Fs * t_idx);
 end
 
 if L < W

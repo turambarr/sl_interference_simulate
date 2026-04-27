@@ -10,7 +10,7 @@ clear; clc; close all;
 % inFile = 'target_signal_multiframe_jammed_3dB.dat';
 % inFile = 'sigtest2.iq';
 % inFile = 'target_signal_jammed_-3dB.dat';
-inFile = "sigtest1.iq";
+inFile = "20250912222305_part1_57_600MHz.iq";
 
 % 输入文件读取设置：
 % input_format = 'auto' | 'iq' | 'dat'
@@ -30,18 +30,18 @@ plot_full_time_domain = true;   % true: 绘制同步扫描区完整时域幅度�
 time_plot_max_points = 2e6;     % 显示抽点上限（仅影响绘图，不影响处理）
 
 % --- SSS 解调参数 ---
-read_length = 6992*3 + 1000;   % 从 read_start_sample 开始读取长度
+read_length = ceil((6992*3 + 1000) * (600 / 409.6));   % 从 read_start_sample 开始读取长度 (按 600MHz 比例缩放)
 sss_decode_start_idx = 1024 + 48;
 target_offset = 0;
 
-fs_source = 409.6e6;
+fs_source = 600e6;
 fs_target = 60e6;
 center_nominal_hz = 63.5e6; % 名义中心频率（用于显示/对比）
 
 % 频率补偿模式：
 % 'manual'      -> 使用手填 center + cfo
 % 'blind_pilot' -> 自动盲估“中心单载波频率”，一步补偿（cfo 置0）
-freq_comp_mode = 'blind_pilot';
+freq_comp_mode = 'manual';
 
 % 手动模式参数
 freq_shift_hz_manual = 63.5e6;   % DDC 中心频率
@@ -152,8 +152,10 @@ switch lower(freq_comp_mode)
             freq_shift_hz_used/1e6, cfo_hz_used/1e3);
 
     case 'blind_pilot'
+        % 盲估仅需要极小一段信号，截取前2^21点（约200万点）即可，避免做千万点级别的超大型FFT
+        x_sync_for_blind = x_sync(1:min(length(x_sync), 2^21));
         [f_center_pilot_hz, blind_info] = estimate_center_pilot_blind_from_signal( ...
-            x_sync, fs_source, blind_target_bw_hz, blind_bw_tol_ratio, ...
+            x_sync_for_blind, fs_source, blind_target_bw_hz, blind_bw_tol_ratio, ...
             blind_occ_bg_win_hz, blind_occ_smooth_hz, blind_occ_thresh_db, blind_min_component_bw_hz, ...
             blind_max_expected_cfo_hz, blind_pilot_bg_win_hz, blind_pilot_min_prom_db, blind_pilot_width_ref_hz, ...
             blind_refine_enable, blind_refine_lpf_bw_hz, blind_refine_iters, blind_refine_fir_order, ...
@@ -171,14 +173,14 @@ switch lower(freq_comp_mode)
         error('未知 freq_comp_mode: %s', freq_comp_mode);
 end
 
-% 归一化匹配滤波
+% 归一化匹配滤波（使用 fftfilt 大幅加速千万级点位与上千Tap滤波器的卷积）
 h_matched = fliplr(conj(pss_local));
-corr_out = filter(h_matched, 1, x_sync);
+corr_out = fftfilt(h_matched(:), x_sync(:));
 corr_mag_sq = abs(corr_out).^2;
 
 E_local = sum(abs(pss_local).^2);
 win_ones = ones(1, length(pss_local));
-E_rx_moving = filter(win_ones, 1, abs(x_sync).^2);
+E_rx_moving = fftfilt(win_ones(:), abs(x_sync(:)).^2);
 E_rx_moving(E_rx_moving < 1e-10) = 1e-10;
 
 corr_norm_pct = (corr_mag_sq ./ (E_local .* E_rx_moving)) * 100;

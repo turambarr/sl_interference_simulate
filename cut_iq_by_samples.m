@@ -5,11 +5,11 @@ clear; clc;
 
 %% 参数区（按需修改）
 inFile = '20250912222305_part1.iq';
-outFile = '8e6.iq';
+outFile = '20250912222305_part1_57.iq';
 
 startSample = 0;   % 从第几个“复采样点”开始裁切（0-based）
-endSample = 8e6;   % 裁切到第几个“复采样点”（0-based，包含端点）
-
+endSample = 14286848;   % 裁切到第几个“复采样点”（0-based，包含端点）
+% target_samples = 14286848; 
 numSamples = endSample - startSample + 1;
 if numSamples <= 0
 	error('endSample 必须 >= startSample（且为包含端点的索引）。');
