@@ -6,10 +6,10 @@ clear; clc; close all;
 
 %% 1. 参数设置
 inFile  = '20250912222305_part1_57.iq';  % 输入文件名称
-outFile = '20250912222305_part1_57_600MHz.iq'; % 输出文件名称
+outFile = '20250912222305_part1_57_819.2MHz.iq'; % 输出文件名称
 
 fs_in  = 409.6e6;   % 原始采样率 (Hz)
-fs_out = 600e6;     % 目标采样率 (Hz)
+fs_out = 819.2e6;     % 目标采样率 (Hz)
 
 % 读取控制 (inf表示读到底，如需测试可在此限制点数，例如 10e6)
 max_read_samples = inf; 

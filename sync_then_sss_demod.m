@@ -10,7 +10,7 @@ clear; clc; close all;
 % inFile = 'target_signal_multiframe_jammed_3dB.dat';
 % inFile = 'sigtest2.iq';
 % inFile = 'target_signal_jammed_-3dB.dat';
-inFile = "20250912222305_part1_57_600MHz.iq";
+inFile = "sigtest1.iq";
 
 % 输入文件读取设置：
 % input_format = 'auto' | 'iq' | 'dat'
@@ -30,18 +30,18 @@ plot_full_time_domain = true;   % true: 绘制同步扫描区完整时域幅度�
 time_plot_max_points = 2e6;     % 显示抽点上限（仅影响绘图，不影响处理）
 
 % --- SSS 解调参数 ---
-read_length = ceil((6992*3 + 1000) * (600 / 409.6));   % 从 read_start_sample 开始读取长度 (按 600MHz 比例缩放)
+read_length = 6992*3 + 1000;   % 从 read_start_sample 开始读取长度（409.6MHz采样率）
 sss_decode_start_idx = 1024 + 48;
 target_offset = 0;
 
-fs_source = 600e6;
+fs_source = 409.6e6;
 fs_target = 60e6;
 center_nominal_hz = 63.5e6; % 名义中心频率（用于显示/对比）
 
 % 频率补偿模式：
 % 'manual'      -> 使用手填 center + cfo
 % 'blind_pilot' -> 自动盲估“中心单载波频率”，一步补偿（cfo 置0）
-freq_comp_mode = 'manual';
+freq_comp_mode = 'blind_pilot';
 
 % 手动模式参数
 freq_shift_hz_manual = 63.5e6;   % DDC 中心频率
@@ -61,6 +61,8 @@ blind_max_expected_cfo_hz = 6e6;
 blind_pilot_bg_win_hz = 0.9e6;
 blind_pilot_min_prom_db = 4.5;
 blind_pilot_width_ref_hz = 0.25e6;
+blind_est_pre_start_samples = round(5000 * 409.6 / 600);  % 从 PSS 起点前多少点开始盲估（409.6MHz采样率）
+blind_est_len = round(40000 * 409.6 / 600);               % 盲估时域长度（409.6MHz采样率）
 
 % 盲估后时域精修（你当前场景峰值很清晰，默认关闭，直接用频域峰值）
 blind_refine_enable = false;
@@ -143,32 +145,14 @@ x_sync = double(x_sync(:));
 x_sync = x_sync - mean(x_sync);
 x_sync = x_sync / (mean(abs(x_sync)) + eps);
 
-% === 频率补偿参数选择：手动 or 盲估 ===
+% 频率估计/补偿参数在 PSS 相关确定 read_start_sample 后再设置。
+% manual 模式直接使用固定参数；blind_pilot 模式从该起点之后读取一段信号估计。
 switch lower(freq_comp_mode)
     case 'manual'
-        freq_shift_hz_used = freq_shift_hz_manual;
-        cfo_hz_used = cfo_hz_manual;
         fprintf('Freq mode: MANUAL, center=%.6f MHz, cfo=%.3f kHz\n', ...
-            freq_shift_hz_used/1e6, cfo_hz_used/1e3);
-
+            freq_shift_hz_manual/1e6, cfo_hz_manual/1e3);
     case 'blind_pilot'
-        % 盲估仅需要极小一段信号，截取前2^21点（约200万点）即可，避免做千万点级别的超大型FFT
-        x_sync_for_blind = x_sync(1:min(length(x_sync), 2^21));
-        [f_center_pilot_hz, blind_info] = estimate_center_pilot_blind_from_signal( ...
-            x_sync_for_blind, fs_source, blind_target_bw_hz, blind_bw_tol_ratio, ...
-            blind_occ_bg_win_hz, blind_occ_smooth_hz, blind_occ_thresh_db, blind_min_component_bw_hz, ...
-            blind_max_expected_cfo_hz, blind_pilot_bg_win_hz, blind_pilot_min_prom_db, blind_pilot_width_ref_hz, ...
-            blind_refine_enable, blind_refine_lpf_bw_hz, blind_refine_iters, blind_refine_fir_order, ...
-            blind_refine_max_delta_hz);
-
-        freq_shift_hz_used = f_center_pilot_hz;
-        cfo_hz_used = 0; % 一步补偿
-
-        fprintf(['Freq mode: BLIND_PILOT, center=%.6f MHz (equiv CFO vs nominal=%.3f kHz), ' ...
-                  'pilotProm=%.2f dB, refineDelta=%.3f kHz, refineUsed=%d\n'], ...
-            freq_shift_hz_used/1e6, (freq_shift_hz_used-center_nominal_hz)/1e3, ...
-              blind_info.prom_db, blind_info.refine_delta_hz/1e3, blind_info.refine_used);
-
+        fprintf('Freq mode: BLIND_PILOT, will estimate after PSS sync start is selected.\n');
     otherwise
         error('未知 freq_comp_mode: %s', freq_comp_mode);
 end
@@ -302,9 +286,52 @@ end
 x_raw = x_raw - mean(x_raw);
 x_raw = x_raw / (mean(abs(x_raw)) + eps);
 
+% === 频率补偿参数选择：手动 or 基于当前 PSS 起点盲估 ===
+switch lower(freq_comp_mode)
+    case 'manual'
+        freq_shift_hz_used = freq_shift_hz_manual;
+        cfo_hz_used = cfo_hz_manual;
+
+    case 'blind_pilot'
+        blind_read_start = max(0, read_start_sample - round(blind_est_pre_start_samples));
+        blind_read_len = min(round(blind_est_len), totalSamples - blind_read_start);
+        if blind_read_len < 2048
+            error('PSS 起点附近剩余样本过短，无法盲估中心频率: pss_start=%d, blind_start=%d, remain=%d', ...
+                read_start_sample, blind_read_start, totalSamples - blind_read_start);
+        end
+
+        fprintf('Estimating center pilot around PSS start: pss_start=%d, blind_start=%d, len=%d...\n', ...
+            read_start_sample, blind_read_start, blind_read_len);
+        [x_blind, meta_blind] = read_iq_auto_local(inFile, blind_read_start, blind_read_len, input_format, dat_header_bytes);
+        if meta_blind.numSamplesRead < 2048
+            error('盲估阶段读取样本过短: got=%d', meta_blind.numSamplesRead);
+        end
+
+        x_blind = double(x_blind(:));
+        x_blind = x_blind - mean(x_blind);
+        x_blind = x_blind / (mean(abs(x_blind)) + eps);
+
+        [f_center_pilot_hz, blind_info] = estimate_center_pilot_blind_from_signal( ...
+            x_blind, fs_source, blind_target_bw_hz, blind_bw_tol_ratio, ...
+            blind_occ_bg_win_hz, blind_occ_smooth_hz, blind_occ_thresh_db, blind_min_component_bw_hz, ...
+            blind_max_expected_cfo_hz, blind_pilot_bg_win_hz, blind_pilot_min_prom_db, blind_pilot_width_ref_hz, ...
+            blind_refine_enable, blind_refine_lpf_bw_hz, blind_refine_iters, blind_refine_fir_order, ...
+            blind_refine_max_delta_hz);
+
+        freq_shift_hz_used = f_center_pilot_hz;
+        cfo_hz_used = 0; % 一步补偿
+
+        fprintf(['Freq mode: BLIND_PILOT, start=%d, center=%.6f MHz ' ...
+                 '(equiv CFO vs nominal=%.3f kHz), pilotProm=%.2f dB, ' ...
+                 'refineDelta=%.3f kHz, refineUsed=%d\n'], ...
+            blind_read_start, freq_shift_hz_used/1e6, ...
+            (freq_shift_hz_used-center_nominal_hz)/1e3, ...
+            blind_info.prom_db, blind_info.refine_delta_hz/1e3, blind_info.refine_used);
+end
+
 %% 3.1 DDC + 可选 CFO 补偿
 t_vec = (0:length(x_raw)-1) / fs_source;
-fprintf('Shifting spectrum left by %.6f MHz at 409.6MHz...\n', freq_shift_hz_used/1e6);
+fprintf('Shifting spectrum left by %.6f MHz at %.1fMHz...\n', freq_shift_hz_used/1e6, fs_source/1e6);
 x_shifted = x_raw .* exp(-1j * 2 * pi * freq_shift_hz_used * t_vec).';
 
 if enable_cfo_comp
