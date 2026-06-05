@@ -10,7 +10,7 @@ clear; clc; close all;
 % inFile = 'target_signal_multiframe_jammed_3dB.dat';
 % inFile = 'sigtest2.iq';
 % inFile = 'target_signal_jammed_-3dB.dat';
-inFile = "sigtest1.iq";
+inFile = "target_signal_multiframe_IF_jammed_-14dB.iq";
 
 % 输入文件读取设置：
 % input_format = 'auto' | 'iq' | 'dat'
@@ -76,6 +76,26 @@ sro_ppm = 0;              % 若已知可回填
 N_fft = 1024;
 demod_all_subcarriers = true;
 decision_rotate_deg = 45;
+
+% x_raw 归一化方式：
+% 'full_mean'        -> 原始整段 read_length 去均值/按 mean(abs) 缩放
+% 'sss_local_robust' -> 仅用 SSS 附近局部窗口估计 DC/幅度，降低区外干扰影响
+raw_norm_mode = 'sss_local_robust';
+raw_norm_guard_60 = 256; % SSS FFT 窗口前后额外纳入的 60MHz 样点数
+
+% 主解调低通方式：
+% 'filtfilt'    -> 双向零相位滤波，可能把目标区后的强干扰反向带入目标区
+% 'single_pass' -> 单向 FIR 滤波，并按 lpf_order/2 补偿固定群延迟，用于对照测试
+main_lpf_mode = 'filtfilt';
+
+% 有效载波选择：
+% 'dynamic' -> 按当前 SSS 符号功率门限检测
+% 'fixed'   -> 使用 fixed_valid_rel_freq_indices 或 fixed_valid_fft_bins
+valid_carrier_mode = 'fixed';
+valid_carrier_power_threshold_ratio = 0.1;
+valid_carrier_dc_guard = 3;
+fixed_valid_rel_freq_indices = [-512:-10, 7:511]; % 相对频率编号
+fixed_valid_fft_bins = [];         % 例如 1:1024，MATLAB FFT bin 编号（1-based）
 
 % BER 计算参数（与4个候选结果逐一比对）
 enable_ber_eval = true;
@@ -283,8 +303,19 @@ if isempty(x_raw)
     error('SSS 解调阶段读取为空。');
 end
 
-x_raw = x_raw - mean(x_raw);
-x_raw = x_raw / (mean(abs(x_raw)) + eps);
+sss_start_idx_60_for_norm = sss_decode_start_idx + target_offset;
+norm_start_60 = max(1, sss_start_idx_60_for_norm - raw_norm_guard_60);
+norm_end_60 = sss_start_idx_60_for_norm + N_fft - 1 + raw_norm_guard_60;
+norm_start_raw = max(1, floor((norm_start_60 - 1) * fs_source / fs_target) + 1);
+norm_end_raw = min(length(x_raw), ceil((norm_end_60 - 1) * fs_source / fs_target) + 1);
+[x_raw, raw_norm_info] = normalize_iq_window_local( ...
+    x_raw, raw_norm_mode, norm_start_raw, norm_end_raw);
+fprintf(['Raw normalization: mode=%s, raw_win=%d:%d (%d samples), ' ...
+         'sss60_win=%d:%d, dc=%.4g%+.4gj, scale=%.4g, ' ...
+         'fullMeanAbs=%.4g, localMeanAbs=%.4g\n'], ...
+    raw_norm_info.mode, raw_norm_info.start_idx, raw_norm_info.end_idx, raw_norm_info.n_win, ...
+    norm_start_60, norm_end_60, real(raw_norm_info.dc), imag(raw_norm_info.dc), ...
+    raw_norm_info.scale, raw_norm_info.full_mean_abs, raw_norm_info.local_mean_abs);
 
 % === 频率补偿参数选择：手动 or 基于当前 PSS 起点盲估 ===
 switch lower(freq_comp_mode)
@@ -349,7 +380,27 @@ fs_eff = fs_source * (1 + sro_ppm/1e6);
 Wn = 35e6 / (fs_source/2);
 lpf_order = 30;
 b_lpf = fir1(lpf_order, Wn);
-x_filt = filtfilt(b_lpf, 1, x_base);
+
+switch lower(main_lpf_mode)
+    case 'filtfilt'
+        fprintf('Main LPF mode: filtfilt (zero-phase bidirectional), order=%d\n', lpf_order);
+        x_filt = filtfilt(b_lpf, 1, x_base);
+
+    case 'single_pass'
+        lpf_group_delay = lpf_order / 2;
+        if abs(lpf_group_delay - round(lpf_group_delay)) > eps
+            error('single_pass 模式要求 lpf_order 为偶数，以便补偿整数群延迟。当前 lpf_order=%d', lpf_order);
+        end
+        lpf_group_delay = round(lpf_group_delay);
+        fprintf('Main LPF mode: single_pass FIR, order=%d, group_delay=%d input samples\n', ...
+            lpf_order, lpf_group_delay);
+        x_filt_delayed = filter(b_lpf, 1, x_base);
+        x_filt = [x_filt_delayed(lpf_group_delay+1:end); zeros(lpf_group_delay, 1)];
+
+    otherwise
+        error('未知 main_lpf_mode: %s', main_lpf_mode);
+end
+x_filt = x_filt(:);
 
 T_in = 1 / fs_eff;
 T_out = 1 / fs_target;
@@ -386,21 +437,48 @@ end
 x_sss_time = x_sro(sss_start_idx_60 : sss_start_idx_60 + N_fft - 1);
 x_sss_freq = fft(x_sss_time, N_fft) / sqrt(N_fft);
 
-% 动态有效载波检测
-pwr_bins = abs(x_sss_freq).^2;
-mean_pwr = mean(pwr_bins);
-threshold_pwr = mean_pwr * 0.1;
-valid_mask_power = pwr_bins > threshold_pwr;
-
-dc_guard = 3;
-valid_mask_power(1:dc_guard) = false;
-valid_mask_power(N_fft-dc_guard+1:N_fft) = false;
-
-valid_idxs = find(valid_mask_power);
-
 rel_freq = zeros(N_fft,1);
 rel_freq(1:N_fft/2) = (0:N_fft/2 - 1).';
 rel_freq(N_fft/2+1:N_fft) = (-N_fft/2:-1).';
+
+% 有效载波检测/选择
+pwr_bins = abs(x_sss_freq).^2;
+mean_pwr = mean(pwr_bins);
+median_pwr = median(pwr_bins);
+max_pwr = max(pwr_bins);
+threshold_pwr = mean_pwr * valid_carrier_power_threshold_ratio;
+valid_mask_power = false(N_fft, 1);
+
+switch lower(valid_carrier_mode)
+    case 'dynamic'
+        valid_mask_power = pwr_bins > threshold_pwr;
+
+        dc_guard = valid_carrier_dc_guard;
+        if dc_guard > 0
+            valid_mask_power(1:dc_guard) = false;
+            valid_mask_power(N_fft-dc_guard+1:N_fft) = false;
+        end
+
+    case 'fixed'
+        if ~isempty(fixed_valid_fft_bins)
+            fixed_bins = unique(round(fixed_valid_fft_bins(:)));
+            fixed_bins = fixed_bins(fixed_bins >= 1 & fixed_bins <= N_fft);
+            valid_mask_power(fixed_bins) = true;
+        elseif ~isempty(fixed_valid_rel_freq_indices)
+            fixed_rel = unique(round(fixed_valid_rel_freq_indices(:)));
+            valid_mask_power = ismember(rel_freq, fixed_rel);
+        else
+            error('valid_carrier_mode=fixed 时，需要设置 fixed_valid_rel_freq_indices 或 fixed_valid_fft_bins。');
+        end
+
+    otherwise
+        error('未知 valid_carrier_mode: %s', valid_carrier_mode);
+end
+
+valid_idxs = find(valid_mask_power);
+if isempty(valid_idxs)
+    error('有效载波检测结果为空。');
+end
 
 freq_indices = rel_freq(valid_idxs);
 syms_valid = x_sss_freq(valid_idxs);
@@ -408,37 +486,43 @@ syms_valid = x_sss_freq(valid_idxs);
 syms_valid = syms_valid(sort_idx);
 valid_idxs = valid_idxs(sort_idx);
 
-% 分段 unwrap + 分段 polyfit
+df_valid = diff(freq_indices);
+seg_start_valid = [1; find(df_valid > 1) + 1];
+seg_end_valid = [find(df_valid > 1); length(freq_indices)];
+seg_len_valid = seg_end_valid - seg_start_valid + 1;
+fprintf(['Valid carriers: mode=%s, count=%d/%d, segments=%d, longest=%d, ' ...
+         'meanP=%.4g, medianP=%.4g, maxP=%.4g, threshold=%.4g\n'], ...
+    valid_carrier_mode, numel(valid_idxs), N_fft, numel(seg_len_valid), max(seg_len_valid), ...
+    mean_pwr, median_pwr, max_pwr, threshold_pwr);
+fprintf('Valid carrier rel-freq ranges: %s\n', format_index_ranges_local(freq_indices, 12));
+
+% 差分共轭乘积估计相位斜率，避免 unwrap 在受干扰子载波处扩散错误。
 syms_pow4 = syms_valid.^4;
+syms_pow4_unit = syms_pow4 ./ (abs(syms_pow4) + eps);
+
 df = diff(freq_indices);
-seg_start = [1; find(df > 1) + 1];
-seg_end = [find(df > 1); length(freq_indices)];
+adjacent_mask = (df == 1);
+phase_steps = conj(syms_pow4_unit(1:end-1)) .* syms_pow4_unit(2:end);
+phase_steps = phase_steps(adjacent_mask);
 
-slope_list = [];
-w_list = [];
-for k = 1:length(seg_start)
-    idx_seg = seg_start(k):seg_end(k);
-    if numel(idx_seg) < 8
-        continue;
-    end
-    f_seg = freq_indices(idx_seg);
-    ph_seg = unwrap(angle(syms_pow4(idx_seg)));
-    p_seg = polyfit(f_seg, ph_seg, 1);
-    slope_list(end+1,1) = p_seg(1); %#ok<SAGROW>
-    w_list(end+1,1) = numel(idx_seg); %#ok<SAGROW>
+if numel(phase_steps) < 8
+    error('连续有效载波不足，无法完成相位斜率估计。');
 end
 
-if isempty(slope_list)
-    error('有效载波不足，无法完成相位拟合。');
-end
+phase_step_sum = sum(phase_steps);
+slope4 = angle(phase_step_sum);
+slope_coherence = abs(phase_step_sum) / numel(phase_steps);
 
-slope4 = sum(slope_list .* w_list) / sum(w_list);
-pow4_detrended = syms_pow4 .* exp(-1j * slope4 * freq_indices);
-phase0_4 = angle(mean(pow4_detrended));
+pow4_detrended = syms_pow4_unit .* exp(-1j * slope4 * freq_indices);
+phase0_4 = angle(sum(pow4_detrended));
+phase0_coherence = abs(mean(pow4_detrended));
 
 full_freq_indices = [(0:N_fft/2-1), (-N_fft/2:-1)].';
 phase_correction = (slope4 * full_freq_indices + phase0_4) / 4;
 x_sss_freq_corr = x_sss_freq .* exp(-1j * phase_correction);
+
+fprintf('SSS phase fit: slope_coh=%.3f, phase0_coh=%.3f, adjacent_pairs=%d\n', ...
+    slope_coherence, phase0_coherence, numel(phase_steps));
 
 if demod_all_subcarriers
     syms_payload = x_sss_freq_corr(:);
@@ -841,6 +925,86 @@ for it = 1:max(1, iters)
     end
 end
 
+end
+
+function [x_norm, info] = normalize_iq_window_local(x, mode, win_start, win_end)
+% 对 IQ 做可切换归一化；局部鲁棒模式只让目标窗口附近样本参与统计。
+x = x(:);
+n = length(x);
+win_start = max(1, min(n, round(win_start)));
+win_end = max(win_start, min(n, round(win_end)));
+mode_l = lower(mode);
+
+info = struct();
+info.mode = mode_l;
+info.start_idx = win_start;
+info.end_idx = win_end;
+info.n_win = win_end - win_start + 1;
+info.full_mean_abs = mean(abs(x));
+info.local_mean_abs = mean(abs(x(win_start:win_end)));
+
+switch mode_l
+    case 'full_mean'
+        dc = mean(x);
+        scale = mean(abs(x - dc));
+
+    case 'sss_local_robust'
+        x_win = x(win_start:win_end);
+        dc = median(real(x_win)) + 1j * median(imag(x_win));
+        scale = median(abs(x_win - dc));
+        if scale < eps
+            scale = mean(abs(x_win - dc));
+        end
+
+    otherwise
+        error('未知 raw_norm_mode: %s', mode);
+end
+
+if scale < eps
+    scale = mean(abs(x - mean(x)));
+end
+if scale < eps
+    scale = 1;
+end
+
+x_norm = (x - dc) / scale;
+info.dc = dc;
+info.scale = scale;
+end
+
+function s = format_index_ranges_local(idx, max_ranges)
+% 将连续整数序列压缩成 a:b 形式，避免诊断打印过长。
+if nargin < 2 || isempty(max_ranges)
+    max_ranges = 12;
+end
+
+idx = unique(idx(:).');
+if isempty(idx)
+    s = '(empty)';
+    return;
+end
+
+d = diff(idx);
+seg_start = [1, find(d > 1) + 1];
+seg_end = [find(d > 1), numel(idx)];
+n_seg = numel(seg_start);
+n_show = min(n_seg, max_ranges);
+parts = cell(1, n_show);
+
+for k = 1:n_show
+    a = idx(seg_start(k));
+    b = idx(seg_end(k));
+    if a == b
+        parts{k} = sprintf('%d', a);
+    else
+        parts{k} = sprintf('%d:%d', a, b);
+    end
+end
+
+s = strjoin(parts, ', ');
+if n_seg > max_ranges
+    s = sprintf('%s, ... (%d ranges total)', s, n_seg);
+end
 end
 
 function [x, meta] = read_iq_auto_local(filename, startSample, numSamples, input_format, dat_header_bytes)
