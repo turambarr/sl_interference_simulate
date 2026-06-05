@@ -82,6 +82,9 @@ decision_rotate_deg = 45;
 % 'sss_local_robust' -> 仅用 SSS 附近局部窗口估计 DC/幅度，降低区外干扰影响
 raw_norm_mode = 'sss_local_robust';
 raw_norm_guard_60 = 256; % SSS FFT 窗口前后额外纳入的 60MHz 样点数
+enable_raw_margin_clip = true;
+raw_margin_clip_factor = 0.9;    % 归一化后，余量区幅度超过该值则限幅
+raw_margin_protect_guard_60 = 128; % SSS FFT 窗口前后不做限幅保护区（60MHz样点）
 
 % 主解调低通方式：
 % 'filtfilt'    -> 双向零相位滤波，可能把目标区后的强干扰反向带入目标区
@@ -316,6 +319,19 @@ fprintf(['Raw normalization: mode=%s, raw_win=%d:%d (%d samples), ' ...
     raw_norm_info.mode, raw_norm_info.start_idx, raw_norm_info.end_idx, raw_norm_info.n_win, ...
     norm_start_60, norm_end_60, real(raw_norm_info.dc), imag(raw_norm_info.dc), ...
     raw_norm_info.scale, raw_norm_info.full_mean_abs, raw_norm_info.local_mean_abs);
+
+clip_protect_start_60 = max(1, sss_start_idx_60_for_norm - raw_margin_protect_guard_60);
+clip_protect_end_60 = sss_start_idx_60_for_norm + N_fft - 1 + raw_margin_protect_guard_60;
+clip_protect_start_raw = max(1, floor((clip_protect_start_60 - 1) * fs_source / fs_target) + 1);
+clip_protect_end_raw = min(length(x_raw), ceil((clip_protect_end_60 - 1) * fs_source / fs_target) + 1);
+[x_raw, raw_clip_info] = clip_iq_margin_local( ...
+    x_raw, enable_raw_margin_clip, raw_margin_clip_factor, ...
+    clip_protect_start_raw, clip_protect_end_raw);
+fprintf(['Raw margin clip: enable=%d, clip=%.3g, protect_raw=%d:%d, ' ...
+         'margin_samples=%d, clipped=%d, maxBefore=%.4g, maxAfter=%.4g\n'], ...
+    raw_clip_info.enable, raw_clip_info.clip_level, raw_clip_info.protect_start, ...
+    raw_clip_info.protect_end, raw_clip_info.n_margin, raw_clip_info.n_clipped, ...
+    raw_clip_info.max_before, raw_clip_info.max_after);
 
 % === 频率补偿参数选择：手动 or 基于当前 PSS 起点盲估 ===
 switch lower(freq_comp_mode)
@@ -970,6 +986,41 @@ end
 x_norm = (x - dc) / scale;
 info.dc = dc;
 info.scale = scale;
+end
+
+function [x_out, info] = clip_iq_margin_local(x, enable_clip, clip_level, protect_start, protect_end)
+% 只对保护区外的余量样本做幅度限幅，保留样本相位。
+x_out = x(:);
+n = length(x_out);
+protect_start = max(1, min(n, round(protect_start)));
+protect_end = max(protect_start, min(n, round(protect_end)));
+
+margin_mask = true(n, 1);
+margin_mask(protect_start:protect_end) = false;
+mag_before = abs(x_out);
+
+info = struct();
+info.enable = logical(enable_clip);
+info.clip_level = clip_level;
+info.protect_start = protect_start;
+info.protect_end = protect_end;
+info.n_margin = nnz(margin_mask);
+info.max_before = max(mag_before);
+
+if enable_clip && clip_level > 0 && any(margin_mask)
+    margin_idx = find(margin_mask);
+    mag_margin = mag_before(margin_idx);
+    clip_mask = mag_margin > clip_level;
+    if any(clip_mask)
+        idx_clip = margin_idx(clip_mask);
+        x_out(idx_clip) = x_out(idx_clip) .* (clip_level ./ (mag_before(idx_clip) + eps));
+    end
+    info.n_clipped = nnz(clip_mask);
+else
+    info.n_clipped = 0;
+end
+
+info.max_after = max(abs(x_out));
 end
 
 function s = format_index_ranges_local(idx, max_ranges)
