@@ -83,7 +83,7 @@ decision_rotate_deg = 45;
 raw_norm_mode = 'sss_local_robust';
 raw_norm_guard_60 = 256; % SSS FFT 窗口前后额外纳入的 60MHz 样点数
 enable_raw_margin_clip = true;
-raw_margin_clip_factor = 0.9;    % 归一化后，余量区幅度超过该值则限幅
+raw_margin_clip_factor = 1;    % 归一化后，余量区幅度超过该值则限幅
 raw_margin_protect_guard_60 = 128; % SSS FFT 窗口前后不做限幅保护区（60MHz样点）
 
 % 主解调低通方式：
@@ -102,6 +102,21 @@ fixed_valid_fft_bins = [];         % 例如 1:1024，MATLAB FFT bin 编号（1-b
 
 % BER 计算参数（与4个候选结果逐一比对）
 enable_ber_eval = true;
+enable_ref_aided_select = true;    % 使用预设 SSS 序列参与 offset 候选选择
+enable_ref_aided_comp = true;      % 使用预设 SSS 序列直接参与相位斜率/公共相位补偿
+enable_ref_guided_phase_fit = true; % 用预设序列去调制后，引导 unwrap + 平滑相位拟合
+ref_guided_phase_fit_order = 2;     % 1=线性相位，2=允许轻微相位弯曲
+ref_guided_fit_max_iters = 3;       % 残差剔除迭代次数
+ref_guided_fit_outlier_sigma = 3.0; % 残差剔除强度
+enable_ref_segment_anchor_fit = true; % 分段参考锚点拟合，抗局部受扰载波段
+ref_anchor_seg_len = 48;              % 每段有效载波数
+ref_anchor_min_coh = 0.3;            % 分段相位锚点最低可信度
+ref_anchor_fit_order = 2;             % 锚点拟合阶数
+ref_anchor_min_segments = 5;          % 最少可信锚点段数
+enable_ref_aided_eq = false;       % 强制感较重的逐子载波相位均衡，默认关闭
+ref_aided_eq_smooth_bins = 3;      % 越小越“贴参考”，1 会退化成几乎逐子载波相位强制对齐
+ref_offset_search = -24:24;        % 在 target_offset 附近搜索的 60MHz 样点偏移
+ref_accept_ber_thresh = 0.03;      % 超过该 BER 则判为无法可靠锁定，不硬改结果
 % 预设正确值（4组）。可填你在 sss_group_summary_173.csv 的 voted_hex
 ber_ref_hex_list = {
     '80C46B5267759FD6505644FC1F0052124876B17F9FA9EA13D3C2A8E274700BE9F511FBCDF1B237B1E6E46FB1A80A762952FCA4FCDB45612E5C6641BC200043442D23B538172067919D89A3D640557B004A5507460C3DC60DEDE45BB18D5FC9D5E944683265F591D6585671A960FF43002E13B478182063925276497C15006A10178064119F89AE831FAABF442C33B9F812205B9272769C29EAFC2E57F1E270347E7388504C853A85EF97AA0E79A3FDD5CC122832DE4EA2E7191A815164CC8CE96EEF4BC01B139D2E5D75B280250380B83D208AC7BD8ACD3A263D2B583218CAA1EB37998E6EF65A2982FFCE5624BB8FCD6F5F4483E3EC5384ED75493BE9CD690B', ... % Ref-1
@@ -441,144 +456,115 @@ x_sro = h0 .* x_filt(idx_base - 1) + ...
         h3 .* x_filt(idx_base + 2);
 x_sro = x_sro(:);
 
-%% 3.3 单点 SSS 频域解调
+%% 3.3 SSS 频域解调（可选参考辅助 offset 选择）
 base_start_idx = sss_decode_start_idx;
-offset = target_offset;
-sss_start_idx_60 = base_start_idx + offset;
-
-if sss_start_idx_60 < 1 || sss_start_idx_60 + N_fft > length(x_sro)
-    error('SSS 起始点越界: idx=%d, len=%d', sss_start_idx_60, length(x_sro));
+if enable_ref_aided_select
+    offset_candidates = unique(target_offset + ref_offset_search(:).');
+else
+    offset_candidates = target_offset;
 end
 
-x_sss_time = x_sro(sss_start_idx_60 : sss_start_idx_60 + N_fft - 1);
-x_sss_freq = fft(x_sss_time, N_fft) / sqrt(N_fft);
+best_trial = [];
+target_trial = [];
+best_score = inf;
+fprintf('Reference-aided offset search: enable=%d, candidates=%s, acceptBER=%.4g\n', ...
+    enable_ref_aided_select, mat2str(offset_candidates), ref_accept_ber_thresh);
 
-rel_freq = zeros(N_fft,1);
-rel_freq(1:N_fft/2) = (0:N_fft/2 - 1).';
-rel_freq(N_fft/2+1:N_fft) = (-N_fft/2:-1).';
+for off_try = offset_candidates
+    try
+        trial = demod_sss_once_local( ...
+            x_sro, base_start_idx, off_try, N_fft, valid_carrier_mode, ...
+            valid_carrier_power_threshold_ratio, valid_carrier_dc_guard, ...
+            fixed_valid_rel_freq_indices, fixed_valid_fft_bins, ...
+            demod_all_subcarriers, decision_rotate_deg, ...
+            enable_ref_aided_comp, ber_ref_hex_list, ...
+            enable_ref_guided_phase_fit, ref_guided_phase_fit_order, ...
+            ref_guided_fit_max_iters, ref_guided_fit_outlier_sigma, ...
+            enable_ref_segment_anchor_fit, ref_anchor_seg_len, ...
+            ref_anchor_min_coh, ref_anchor_fit_order, ref_anchor_min_segments, ...
+            enable_ref_aided_eq, ref_aided_eq_smooth_bins, ...
+            unstable_bit_positions, unstable_nibble_positions, false);
 
-% 有效载波检测/选择
-pwr_bins = abs(x_sss_freq).^2;
-mean_pwr = mean(pwr_bins);
-median_pwr = median(pwr_bins);
-max_pwr = max(pwr_bins);
-threshold_pwr = mean_pwr * valid_carrier_power_threshold_ratio;
-valid_mask_power = false(N_fft, 1);
-
-switch lower(valid_carrier_mode)
-    case 'dynamic'
-        valid_mask_power = pwr_bins > threshold_pwr;
-
-        dc_guard = valid_carrier_dc_guard;
-        if dc_guard > 0
-            valid_mask_power(1:dc_guard) = false;
-            valid_mask_power(N_fft-dc_guard+1:N_fft) = false;
-        end
-
-    case 'fixed'
-        if ~isempty(fixed_valid_fft_bins)
-            fixed_bins = unique(round(fixed_valid_fft_bins(:)));
-            fixed_bins = fixed_bins(fixed_bins >= 1 & fixed_bins <= N_fft);
-            valid_mask_power(fixed_bins) = true;
-        elseif ~isempty(fixed_valid_rel_freq_indices)
-            fixed_rel = unique(round(fixed_valid_rel_freq_indices(:)));
-            valid_mask_power = ismember(rel_freq, fixed_rel);
+        [trial.ref_best_ber, trial.ref_best_rot_idx, trial.ref_best_ref_idx, trial.ref_best_err, trial.ref_best_n] = ...
+            score_bits_against_refs_local( ...
+                trial.demod_bits_candidates, ber_ref_hex_list, ...
+                unstable_bit_positions, unstable_nibble_positions);
+        if trial.ref_best_rot_idx >= 1 && trial.ref_best_rot_idx <= numel(trial.rot_angles_deg)
+            trial.ref_best_rot_deg = trial.rot_angles_deg(trial.ref_best_rot_idx);
         else
-            error('valid_carrier_mode=fixed 时，需要设置 fixed_valid_rel_freq_indices 或 fixed_valid_fft_bins。');
+            trial.ref_best_rot_deg = nan;
         end
 
-    otherwise
-        error('未知 valid_carrier_mode: %s', valid_carrier_mode);
+        if enable_ref_aided_select && ~isnan(trial.ref_best_ber)
+            score = trial.ref_best_ber;
+        else
+            score = off_try ~= target_offset;
+        end
+
+        fprintf(['  offset=%+d: scoreBER=%.6g, rot=%g deg, ref=%d, err=%d/%d, ' ...
+                 'comp=%s, compBER=%.6g, compCoh=%.3f, slope_coh=%.3f\n'], ...
+            off_try, trial.ref_best_ber, trial.ref_best_rot_deg, trial.ref_best_ref_idx, ...
+            trial.ref_best_err, trial.ref_best_n, ...
+            trial.comp_mode, trial.comp_score_ber, trial.comp_coh, trial.slope_coherence);
+
+        if score < best_score
+            best_score = score;
+            best_trial = trial;
+        end
+        if off_try == target_offset
+            target_trial = trial;
+        end
+    catch ME
+        fprintf('  offset=%+d: failed (%s)\n', off_try, ME.message);
+    end
 end
 
-valid_idxs = find(valid_mask_power);
-if isempty(valid_idxs)
-    error('有效载波检测结果为空。');
+if isempty(best_trial)
+    error('所有 SSS offset 候选均解调失败。');
 end
 
-freq_indices = rel_freq(valid_idxs);
-syms_valid = x_sss_freq(valid_idxs);
-[freq_indices, sort_idx] = sort(freq_indices);
-syms_valid = syms_valid(sort_idx);
-valid_idxs = valid_idxs(sort_idx);
+if enable_ref_aided_select
+    ref_aided_accept = ~isnan(best_trial.ref_best_ber) && best_trial.ref_best_ber <= ref_accept_ber_thresh;
+    if ref_aided_accept
+        fprintf(['Reference-aided select: ACCEPT offset=%+d, rot=%g deg, ref=%d, ' ...
+                 'BER=%.6g (err=%d/%d)\n'], ...
+            best_trial.offset, best_trial.ref_best_rot_deg, best_trial.ref_best_ref_idx, ...
+            best_trial.ref_best_ber, best_trial.ref_best_err, best_trial.ref_best_n);
+    else
+        fprintf(['Reference-aided select: REJECT best_offset=%+d, rot=%g deg, ref=%d, ' ...
+                 'BER=%.6g (err=%d/%d), threshold=%.6g\n'], ...
+            best_trial.offset, best_trial.ref_best_rot_deg, best_trial.ref_best_ref_idx, ...
+            best_trial.ref_best_ber, best_trial.ref_best_err, best_trial.ref_best_n, ...
+            ref_accept_ber_thresh);
+        if ~isempty(target_trial)
+            fprintf('Reference-aided select: fallback to original target_offset=%+d.\n', target_offset);
+            best_trial = target_trial;
+        end
+    end
+end
 
-df_valid = diff(freq_indices);
-seg_start_valid = [1; find(df_valid > 1) + 1];
-seg_end_valid = [find(df_valid > 1); length(freq_indices)];
-seg_len_valid = seg_end_valid - seg_start_valid + 1;
+offset = best_trial.offset;
+sss_start_idx_60 = best_trial.sss_start_idx_60;
+x_sss_freq_corr = best_trial.x_sss_freq_corr;
+syms_payload = best_trial.syms_payload;
+payload_label = best_trial.payload_label;
+rot_angles_deg = best_trial.rot_angles_deg;
+hex_candidates = best_trial.hex_candidates;
+demod_bits_candidates = best_trial.demod_bits_candidates;
+
 fprintf(['Valid carriers: mode=%s, count=%d/%d, segments=%d, longest=%d, ' ...
          'meanP=%.4g, medianP=%.4g, maxP=%.4g, threshold=%.4g\n'], ...
-    valid_carrier_mode, numel(valid_idxs), N_fft, numel(seg_len_valid), max(seg_len_valid), ...
-    mean_pwr, median_pwr, max_pwr, threshold_pwr);
-fprintf('Valid carrier rel-freq ranges: %s\n', format_index_ranges_local(freq_indices, 12));
-
-% 差分共轭乘积估计相位斜率，避免 unwrap 在受干扰子载波处扩散错误。
-syms_pow4 = syms_valid.^4;
-syms_pow4_unit = syms_pow4 ./ (abs(syms_pow4) + eps);
-
-df = diff(freq_indices);
-adjacent_mask = (df == 1);
-phase_steps = conj(syms_pow4_unit(1:end-1)) .* syms_pow4_unit(2:end);
-phase_steps = phase_steps(adjacent_mask);
-
-if numel(phase_steps) < 8
-    error('连续有效载波不足，无法完成相位斜率估计。');
-end
-
-phase_step_sum = sum(phase_steps);
-slope4 = angle(phase_step_sum);
-slope_coherence = abs(phase_step_sum) / numel(phase_steps);
-
-pow4_detrended = syms_pow4_unit .* exp(-1j * slope4 * freq_indices);
-phase0_4 = angle(sum(pow4_detrended));
-phase0_coherence = abs(mean(pow4_detrended));
-
-full_freq_indices = [(0:N_fft/2-1), (-N_fft/2:-1)].';
-phase_correction = (slope4 * full_freq_indices + phase0_4) / 4;
-x_sss_freq_corr = x_sss_freq .* exp(-1j * phase_correction);
-
+    valid_carrier_mode, best_trial.valid_count, N_fft, ...
+    best_trial.valid_segments, best_trial.valid_longest, ...
+    best_trial.mean_pwr, best_trial.median_pwr, best_trial.max_pwr, best_trial.threshold_pwr);
+fprintf('Valid carrier rel-freq ranges: %s\n', best_trial.valid_ranges);
 fprintf('SSS phase fit: slope_coh=%.3f, phase0_coh=%.3f, adjacent_pairs=%d\n', ...
-    slope_coherence, phase0_coherence, numel(phase_steps));
-
-if demod_all_subcarriers
-    syms_payload = x_sss_freq_corr(:);
-    payload_label = sprintf('All carriers: %d', N_fft);
-else
-    syms_payload = x_sss_freq_corr(valid_idxs);
-    payload_label = sprintf('Valid carriers: %d', length(valid_idxs));
-end
-
-%% 3.4 QPSK 4-way 候选
-rot_angles_deg = decision_rotate_deg + [0, 90, 180, 270];
-hex_candidates = cell(1,4);
-demod_bits_candidates = cell(1,4);
-for r = 1:4
-    syms_payload_rot = syms_payload .* exp(1j * decision_rotate_deg * pi/180) .* exp(-1j * (r-1) * pi/2);
-    bits_I = real(syms_payload_rot) < 0;
-    bits_Q = imag(syms_payload_rot) < 0;
-
-    demod_bits = zeros(length(syms_payload_rot)*2, 1);
-    demod_bits(1:2:end) = bits_I;
-    demod_bits(2:2:end) = bits_Q;
-    demod_bits_candidates{r} = demod_bits;
-
-    full_hex_str = '';
-    for i_hex = 1:4:length(demod_bits)
-        if i_hex + 3 > length(demod_bits)
-            chunk = demod_bits(i_hex:end);
-            val = 0;
-            for b = 1:length(chunk)
-                val = val + chunk(b) * 2^(length(chunk)-b);
-            end
-            full_hex_str = [full_hex_str, dec2hex(val)]; %#ok<AGROW>
-            break;
-        end
-        chunk = demod_bits(i_hex:i_hex+3);
-        val = chunk(1)*8 + chunk(2)*4 + chunk(3)*2 + chunk(4);
-        full_hex_str = [full_hex_str, dec2hex(val)]; %#ok<AGROW>
-    end
-    hex_candidates{r} = full_hex_str;
-end
+    best_trial.slope_coherence, best_trial.phase0_coherence, best_trial.adjacent_pairs);
+fprintf('SSS compensation selected: %s, compBER=%.6g, compRef=%d, compRotIdx=%d, compCoh=%.3f\n', ...
+    best_trial.comp_mode, best_trial.comp_score_ber, best_trial.comp_score_ref_idx, ...
+    best_trial.comp_score_rot_idx, best_trial.comp_coh);
+fprintf('Reference-aided final best BER: %.6g (err=%d/%d), offset=%+d\n', ...
+    best_trial.ref_best_ber, best_trial.ref_best_err, best_trial.ref_best_n, best_trial.offset);
 
 %% 3.5 可视化与输出
 figure('Position', [300, 300, 640, 560], 'Name', 'SSS Demod (Sync-driven read_start_sample)');
@@ -682,9 +668,652 @@ if enable_ber_eval
             fprintf('Best for Cand[%3d deg] -> Ref[%d], BER=%.6g\n', rot_angles_deg(i), idx, v);
         end
         fprintf('================================================\n');
-    end
+end
 end
 end % end for run_idx
+
+function trial = demod_sss_once_local( ...
+    x_sro, base_start_idx, offset, N_fft, valid_carrier_mode, ...
+    valid_carrier_power_threshold_ratio, valid_carrier_dc_guard, ...
+    fixed_valid_rel_freq_indices, fixed_valid_fft_bins, ...
+    demod_all_subcarriers, decision_rotate_deg, ...
+    enable_ref_aided_comp, ref_hex_list, ...
+    enable_ref_guided_phase_fit, ref_guided_phase_fit_order, ...
+    ref_guided_fit_max_iters, ref_guided_fit_outlier_sigma, ...
+    enable_ref_segment_anchor_fit, ref_anchor_seg_len, ...
+    ref_anchor_min_coh, ref_anchor_fit_order, ref_anchor_min_segments, ...
+    enable_ref_aided_eq, ref_aided_eq_smooth_bins, ...
+    unstable_bit_positions, unstable_nibble_positions, verbose)
+
+if nargin < 27
+    verbose = false;
+end
+
+sss_start_idx_60 = base_start_idx + offset;
+if sss_start_idx_60 < 1 || sss_start_idx_60 + N_fft > length(x_sro)
+    error('SSS 起始点越界: idx=%d, len=%d', sss_start_idx_60, length(x_sro));
+end
+
+x_sss_time = x_sro(sss_start_idx_60 : sss_start_idx_60 + N_fft - 1);
+x_sss_freq = fft(x_sss_time, N_fft) / sqrt(N_fft);
+
+rel_freq = zeros(N_fft,1);
+rel_freq(1:N_fft/2) = (0:N_fft/2 - 1).';
+rel_freq(N_fft/2+1:N_fft) = (-N_fft/2:-1).';
+
+pwr_bins = abs(x_sss_freq).^2;
+mean_pwr = mean(pwr_bins);
+median_pwr = median(pwr_bins);
+max_pwr = max(pwr_bins);
+threshold_pwr = mean_pwr * valid_carrier_power_threshold_ratio;
+valid_mask_power = false(N_fft, 1);
+
+switch lower(valid_carrier_mode)
+    case 'dynamic'
+        valid_mask_power = pwr_bins > threshold_pwr;
+        dc_guard = valid_carrier_dc_guard;
+        if dc_guard > 0
+            valid_mask_power(1:dc_guard) = false;
+            valid_mask_power(N_fft-dc_guard+1:N_fft) = false;
+        end
+
+    case 'fixed'
+        if ~isempty(fixed_valid_fft_bins)
+            fixed_bins = unique(round(fixed_valid_fft_bins(:)));
+            fixed_bins = fixed_bins(fixed_bins >= 1 & fixed_bins <= N_fft);
+            valid_mask_power(fixed_bins) = true;
+        elseif ~isempty(fixed_valid_rel_freq_indices)
+            fixed_rel = unique(round(fixed_valid_rel_freq_indices(:)));
+            valid_mask_power = ismember(rel_freq, fixed_rel);
+        else
+            error('valid_carrier_mode=fixed 时，需要设置 fixed_valid_rel_freq_indices 或 fixed_valid_fft_bins。');
+        end
+
+    otherwise
+        error('未知 valid_carrier_mode: %s', valid_carrier_mode);
+end
+
+valid_idxs = find(valid_mask_power);
+if isempty(valid_idxs)
+    error('有效载波检测结果为空。');
+end
+
+freq_indices = rel_freq(valid_idxs);
+syms_valid = x_sss_freq(valid_idxs);
+[freq_indices, sort_idx] = sort(freq_indices);
+syms_valid = syms_valid(sort_idx);
+valid_idxs = valid_idxs(sort_idx);
+
+df_valid = diff(freq_indices);
+seg_start_valid = [1; find(df_valid > 1) + 1];
+seg_end_valid = [find(df_valid > 1); length(freq_indices)];
+seg_len_valid = seg_end_valid - seg_start_valid + 1;
+
+syms_pow4 = syms_valid.^4;
+syms_pow4_unit = syms_pow4 ./ (abs(syms_pow4) + eps);
+df = diff(freq_indices);
+adjacent_mask = (df == 1);
+phase_steps = conj(syms_pow4_unit(1:end-1)) .* syms_pow4_unit(2:end);
+phase_steps = phase_steps(adjacent_mask);
+if numel(phase_steps) < 8
+    error('连续有效载波不足，无法完成相位斜率估计。');
+end
+
+phase_step_sum = sum(phase_steps);
+slope4 = angle(phase_step_sum);
+slope_coherence = abs(phase_step_sum) / numel(phase_steps);
+pow4_detrended = syms_pow4_unit .* exp(-1j * slope4 * freq_indices);
+phase0_4 = angle(sum(pow4_detrended));
+phase0_coherence = abs(mean(pow4_detrended));
+
+full_freq_indices = [(0:N_fft/2-1), (-N_fft/2:-1)].';
+phase_correction = (slope4 * full_freq_indices + phase0_4) / 4;
+rot_angles_deg = decision_rotate_deg + [0, 90, 180, 270];
+
+comp_trials = {};
+x_sss_freq_corr_blind = x_sss_freq .* exp(-1j * phase_correction);
+[syms_payload_blind, payload_label_blind] = select_payload_syms_local( ...
+    x_sss_freq_corr_blind, valid_idxs, demod_all_subcarriers, N_fft);
+[hex_blind, bits_blind] = demod_qpsk_candidates_local( ...
+    syms_payload_blind, decision_rotate_deg);
+[ber_blind, rot_blind, ref_blind, err_blind, n_blind] = score_bits_against_refs_local( ...
+    bits_blind, ref_hex_list, unstable_bit_positions, unstable_nibble_positions);
+comp_trials{end+1} = struct( ...
+    'mode', 'blind_pow4', ...
+    'x_corr', x_sss_freq_corr_blind, ...
+    'syms_payload', syms_payload_blind, ...
+    'payload_label', payload_label_blind, ...
+    'hex_candidates', {hex_blind}, ...
+    'demod_bits_candidates', {bits_blind}, ...
+    'score_ber', ber_blind, ...
+    'score_rot_idx', rot_blind, ...
+    'score_ref_idx', ref_blind, ...
+    'score_err', err_blind, ...
+    'score_n', n_blind, ...
+    'slope', slope4 / 4, ...
+    'phase0', phase0_4 / 4, ...
+    'coh', slope_coherence);
+
+if enable_ref_aided_comp
+    for ref_idx = 1:numel(ref_hex_list)
+        ref_hex = strtrim(ref_hex_list{ref_idx});
+        if isempty(ref_hex)
+            continue;
+        end
+        ref_bits = hex_to_bits_local(ref_hex);
+        if length(ref_bits) < 2*N_fft
+            continue;
+        end
+
+        for rot_idx = 1:numel(rot_angles_deg)
+            ref_syms_full = bits_to_qpsk_pre_rotation_local( ...
+                ref_bits(1:2*N_fft), decision_rotate_deg, rot_idx);
+            ref_syms_valid = ref_syms_full(valid_idxs);
+
+            z_ref = x_sss_freq(valid_idxs) .* conj(ref_syms_valid(:));
+            z_ref = z_ref ./ (abs(z_ref) + eps);
+            phase_steps_ref = conj(z_ref(1:end-1)) .* z_ref(2:end);
+            phase_steps_ref = phase_steps_ref(adjacent_mask);
+            if numel(phase_steps_ref) < 8
+                continue;
+            end
+
+            phase_step_sum_ref = sum(phase_steps_ref);
+            slope_ref = angle(phase_step_sum_ref);
+            coh_ref = abs(phase_step_sum_ref) / numel(phase_steps_ref);
+            phase0_ref = angle(sum(z_ref .* exp(-1j * slope_ref * freq_indices)));
+
+            phase_correction_ref = slope_ref * full_freq_indices + phase0_ref;
+            x_corr_ref = x_sss_freq .* exp(-1j * phase_correction_ref);
+            [syms_payload_ref, payload_label_ref] = select_payload_syms_local( ...
+                x_corr_ref, valid_idxs, demod_all_subcarriers, N_fft);
+            [hex_ref, bits_ref] = demod_qpsk_candidates_local( ...
+                syms_payload_ref, decision_rotate_deg);
+            [ber_ref, rot_ref, best_ref_idx, err_ref, n_ref] = score_bits_against_refs_local( ...
+                bits_ref, ref_hex_list, unstable_bit_positions, unstable_nibble_positions);
+
+            comp_trials{end+1} = struct( ...
+                'mode', sprintf('ref_aided_ref%d_rot%d', ref_idx, rot_angles_deg(rot_idx)), ...
+                'x_corr', x_corr_ref, ...
+                'syms_payload', syms_payload_ref, ...
+                'payload_label', payload_label_ref, ...
+                'hex_candidates', {hex_ref}, ...
+                'demod_bits_candidates', {bits_ref}, ...
+                'score_ber', ber_ref, ...
+                'score_rot_idx', rot_ref, ...
+                'score_ref_idx', best_ref_idx, ...
+                'score_err', err_ref, ...
+                'score_n', n_ref, ...
+                'slope', slope_ref, ...
+                'phase0', phase0_ref, ...
+                'coh', coh_ref);
+        end
+    end
+end
+
+if enable_ref_guided_phase_fit
+    for ref_idx = 1:numel(ref_hex_list)
+        ref_hex = strtrim(ref_hex_list{ref_idx});
+        if isempty(ref_hex)
+            continue;
+        end
+        ref_bits = hex_to_bits_local(ref_hex);
+        if length(ref_bits) < 2*N_fft
+            continue;
+        end
+
+        for rot_idx = 1:numel(rot_angles_deg)
+            ref_syms_full = bits_to_qpsk_pre_rotation_local( ...
+                ref_bits(1:2*N_fft), decision_rotate_deg, rot_idx);
+
+            [phase_correction_fit, fit_info] = fit_ref_guided_phase_local( ...
+                x_sss_freq, ref_syms_full, rel_freq, valid_idxs, ...
+                ref_guided_phase_fit_order, ref_guided_fit_max_iters, ref_guided_fit_outlier_sigma);
+
+            x_corr_fit = x_sss_freq .* exp(-1j * phase_correction_fit);
+            [syms_payload_fit, payload_label_fit] = select_payload_syms_local( ...
+                x_corr_fit, valid_idxs, demod_all_subcarriers, N_fft);
+            [hex_fit, bits_fit] = demod_qpsk_candidates_local( ...
+                syms_payload_fit, decision_rotate_deg);
+            [ber_fit, rot_fit, best_ref_idx_fit, err_fit, n_fit] = score_bits_against_refs_local( ...
+                bits_fit, ref_hex_list, unstable_bit_positions, unstable_nibble_positions);
+
+            comp_trials{end+1} = struct( ...
+                'mode', sprintf('ref_guided_fit_ref%d_rot%d_ord%d', ref_idx, rot_angles_deg(rot_idx), ref_guided_phase_fit_order), ...
+                'x_corr', x_corr_fit, ...
+                'syms_payload', syms_payload_fit, ...
+                'payload_label', payload_label_fit, ...
+                'hex_candidates', {hex_fit}, ...
+                'demod_bits_candidates', {bits_fit}, ...
+                'score_ber', ber_fit, ...
+                'score_rot_idx', rot_fit, ...
+                'score_ref_idx', best_ref_idx_fit, ...
+                'score_err', err_fit, ...
+                'score_n', n_fit, ...
+                'slope', fit_info.slope, ...
+                'phase0', fit_info.phase0, ...
+                'coh', fit_info.coherence);
+        end
+    end
+end
+
+if enable_ref_segment_anchor_fit
+    for ref_idx = 1:numel(ref_hex_list)
+        ref_hex = strtrim(ref_hex_list{ref_idx});
+        if isempty(ref_hex)
+            continue;
+        end
+        ref_bits = hex_to_bits_local(ref_hex);
+        if length(ref_bits) < 2*N_fft
+            continue;
+        end
+
+        for rot_idx = 1:numel(rot_angles_deg)
+            ref_syms_full = bits_to_qpsk_pre_rotation_local( ...
+                ref_bits(1:2*N_fft), decision_rotate_deg, rot_idx);
+
+            try
+                [phase_correction_anchor, anchor_info] = fit_ref_segment_anchor_phase_local( ...
+                    x_sss_freq, ref_syms_full, rel_freq, valid_idxs, ...
+                    ref_anchor_seg_len, ref_anchor_min_coh, ref_anchor_fit_order, ref_anchor_min_segments);
+            catch
+                continue;
+            end
+
+            x_corr_anchor = x_sss_freq .* exp(-1j * phase_correction_anchor);
+            [syms_payload_anchor, payload_label_anchor] = select_payload_syms_local( ...
+                x_corr_anchor, valid_idxs, demod_all_subcarriers, N_fft);
+            [hex_anchor, bits_anchor] = demod_qpsk_candidates_local( ...
+                syms_payload_anchor, decision_rotate_deg);
+            [ber_anchor, rot_anchor, best_ref_idx_anchor, err_anchor, n_anchor] = score_bits_against_refs_local( ...
+                bits_anchor, ref_hex_list, unstable_bit_positions, unstable_nibble_positions);
+
+            comp_trials{end+1} = struct( ...
+                'mode', sprintf('ref_anchor_ref%d_rot%d_seg%d_ord%d', ref_idx, rot_angles_deg(rot_idx), ref_anchor_seg_len, ref_anchor_fit_order), ...
+                'x_corr', x_corr_anchor, ...
+                'syms_payload', syms_payload_anchor, ...
+                'payload_label', payload_label_anchor, ...
+                'hex_candidates', {hex_anchor}, ...
+                'demod_bits_candidates', {bits_anchor}, ...
+                'score_ber', ber_anchor, ...
+                'score_rot_idx', rot_anchor, ...
+                'score_ref_idx', best_ref_idx_anchor, ...
+                'score_err', err_anchor, ...
+                'score_n', n_anchor, ...
+                'slope', anchor_info.slope, ...
+                'phase0', anchor_info.phase0, ...
+                'coh', anchor_info.mean_coh);
+        end
+    end
+end
+
+if enable_ref_aided_eq
+    for ref_idx = 1:numel(ref_hex_list)
+        ref_hex = strtrim(ref_hex_list{ref_idx});
+        if isempty(ref_hex)
+            continue;
+        end
+        ref_bits = hex_to_bits_local(ref_hex);
+        if length(ref_bits) < 2*N_fft
+            continue;
+        end
+
+        for rot_idx = 1:numel(rot_angles_deg)
+            ref_syms_full = bits_to_qpsk_pre_rotation_local( ...
+                ref_bits(1:2*N_fft), decision_rotate_deg, rot_idx);
+
+            h_est = x_sss_freq(:) .* conj(ref_syms_full(:));
+            h_unit = h_est ./ (abs(h_est) + eps);
+            h_smooth = smooth_freq_response_local(h_unit, rel_freq, ref_aided_eq_smooth_bins);
+            x_corr_eq = x_sss_freq .* conj(h_smooth);
+
+            [syms_payload_eq, payload_label_eq] = select_payload_syms_local( ...
+                x_corr_eq, valid_idxs, demod_all_subcarriers, N_fft);
+            [hex_eq, bits_eq] = demod_qpsk_candidates_local( ...
+                syms_payload_eq, decision_rotate_deg);
+            [ber_eq, rot_eq, best_ref_idx_eq, err_eq, n_eq] = score_bits_against_refs_local( ...
+                bits_eq, ref_hex_list, unstable_bit_positions, unstable_nibble_positions);
+
+            comp_trials{end+1} = struct( ...
+                'mode', sprintf('ref_eq_ref%d_rot%d_sm%d', ref_idx, rot_angles_deg(rot_idx), ref_aided_eq_smooth_bins), ...
+                'x_corr', x_corr_eq, ...
+                'syms_payload', syms_payload_eq, ...
+                'payload_label', payload_label_eq, ...
+                'hex_candidates', {hex_eq}, ...
+                'demod_bits_candidates', {bits_eq}, ...
+                'score_ber', ber_eq, ...
+                'score_rot_idx', rot_eq, ...
+                'score_ref_idx', best_ref_idx_eq, ...
+                'score_err', err_eq, ...
+                'score_n', n_eq, ...
+                'slope', nan, ...
+                'phase0', nan, ...
+                'coh', abs(mean(h_smooth)));
+        end
+    end
+end
+
+best_comp = comp_trials{1};
+for ci = 2:numel(comp_trials)
+    cand = comp_trials{ci};
+    if isnan(best_comp.score_ber) || (~isnan(cand.score_ber) && cand.score_ber < best_comp.score_ber)
+        best_comp = cand;
+    end
+end
+
+trial = struct();
+trial.offset = offset;
+trial.sss_start_idx_60 = sss_start_idx_60;
+trial.x_sss_freq_corr = best_comp.x_corr;
+trial.syms_payload = best_comp.syms_payload;
+trial.payload_label = best_comp.payload_label;
+trial.rot_angles_deg = rot_angles_deg;
+trial.hex_candidates = best_comp.hex_candidates;
+trial.demod_bits_candidates = best_comp.demod_bits_candidates;
+trial.comp_mode = best_comp.mode;
+trial.comp_score_ber = best_comp.score_ber;
+trial.comp_score_rot_idx = best_comp.score_rot_idx;
+trial.comp_score_ref_idx = best_comp.score_ref_idx;
+trial.comp_score_err = best_comp.score_err;
+trial.comp_score_n = best_comp.score_n;
+trial.comp_slope = best_comp.slope;
+trial.comp_phase0 = best_comp.phase0;
+trial.comp_coh = best_comp.coh;
+trial.valid_count = numel(valid_idxs);
+trial.valid_segments = numel(seg_len_valid);
+trial.valid_longest = max(seg_len_valid);
+trial.valid_ranges = format_index_ranges_local(freq_indices, 12);
+trial.mean_pwr = mean_pwr;
+trial.median_pwr = median_pwr;
+trial.max_pwr = max_pwr;
+trial.threshold_pwr = threshold_pwr;
+trial.slope_coherence = slope_coherence;
+trial.phase0_coherence = phase0_coherence;
+trial.adjacent_pairs = numel(phase_steps);
+
+if verbose
+    fprintf('SSS offset=%+d: carriers=%d, slope_coh=%.3f, phase0_coh=%.3f\n', ...
+        offset, trial.valid_count, slope_coherence, phase0_coherence);
+end
+end
+
+function [best_ber, best_rot_idx, best_ref_idx, best_err, best_n] = score_bits_against_refs_local( ...
+    demod_bits_candidates, ref_hex_list, unstable_bit_positions, unstable_nibble_positions)
+
+best_ber = nan;
+best_rot_idx = 0;
+best_ref_idx = 0;
+best_err = 0;
+best_n = 0;
+
+for i = 1:numel(demod_bits_candidates)
+    bits_est = demod_bits_candidates{i};
+    for j = 1:numel(ref_hex_list)
+        ref_hex = strtrim(ref_hex_list{j});
+        if isempty(ref_hex)
+            continue;
+        end
+
+        bits_ref = hex_to_bits_local(ref_hex);
+        nUse = min(length(bits_est), length(bits_ref));
+        if nUse <= 0
+            continue;
+        end
+
+        keep_mask = true(nUse,1);
+        ub = unstable_bit_positions(:);
+        ub = ub(ub >= 1 & ub <= nUse);
+        keep_mask(ub) = false;
+
+        un = unstable_nibble_positions(:);
+        un = un(un >= 1);
+        for k = 1:numel(un)
+            b1 = 4*(un(k)-1) + 1;
+            b2 = 4*un(k);
+            if b1 > nUse
+                continue;
+            end
+            keep_mask(b1:min(b2,nUse)) = false;
+        end
+
+        nKeep = nnz(keep_mask);
+        if nKeep <= 0
+            continue;
+        end
+
+        bits_e = bits_est(1:nUse);
+        bits_r = bits_ref(1:nUse);
+        err = nnz(bits_e(keep_mask) ~= bits_r(keep_mask));
+        ber = err / nKeep;
+
+        if isnan(best_ber) || ber < best_ber
+            best_ber = ber;
+            best_rot_idx = i;
+            best_ref_idx = j;
+            best_err = err;
+            best_n = nKeep;
+        end
+    end
+end
+end
+
+function [syms_payload, payload_label] = select_payload_syms_local(x_sss_freq_corr, valid_idxs, demod_all_subcarriers, N_fft)
+if demod_all_subcarriers
+    syms_payload = x_sss_freq_corr(:);
+    payload_label = sprintf('All carriers: %d', N_fft);
+else
+    syms_payload = x_sss_freq_corr(valid_idxs);
+    payload_label = sprintf('Valid carriers: %d', length(valid_idxs));
+end
+end
+
+function [hex_candidates, demod_bits_candidates] = demod_qpsk_candidates_local(syms_payload, decision_rotate_deg)
+hex_candidates = cell(1,4);
+demod_bits_candidates = cell(1,4);
+for r = 1:4
+    syms_payload_rot = syms_payload .* exp(1j * decision_rotate_deg * pi/180) .* exp(-1j * (r-1) * pi/2);
+    bits_I = real(syms_payload_rot) < 0;
+    bits_Q = imag(syms_payload_rot) < 0;
+
+    demod_bits = zeros(length(syms_payload_rot)*2, 1);
+    demod_bits(1:2:end) = bits_I;
+    demod_bits(2:2:end) = bits_Q;
+    demod_bits_candidates{r} = demod_bits;
+    hex_candidates{r} = bits_to_hex_local(demod_bits);
+end
+end
+
+function syms = bits_to_qpsk_pre_rotation_local(bits, decision_rotate_deg, rot_idx)
+bits = bits(:);
+n_sym = floor(length(bits) / 2);
+bits = bits(1:2*n_sym);
+bits_I = bits(1:2:end);
+bits_Q = bits(2:2:end);
+
+syms_rot = (1 - 2*double(bits_I)) + 1j * (1 - 2*double(bits_Q));
+syms_rot = syms_rot / sqrt(2);
+
+syms = syms_rot .* exp(-1j * decision_rotate_deg * pi/180) .* exp(1j * (rot_idx-1) * pi/2);
+syms = syms(:);
+end
+
+function [phase_full, info] = fit_ref_guided_phase_local( ...
+    x_freq, ref_syms_full, rel_freq, valid_idxs, fit_order, max_iters, outlier_sigma)
+% 用已知参考符号去掉 QPSK 数据相位，再对残余相位做 unwrap + 低阶拟合。
+x_freq = x_freq(:);
+ref_syms_full = ref_syms_full(:);
+rel_freq = rel_freq(:);
+valid_idxs = valid_idxs(:);
+
+z = x_freq(valid_idxs) .* conj(ref_syms_full(valid_idxs));
+z = z ./ (abs(z) + eps);
+f = rel_freq(valid_idxs);
+f_scale = max(abs(f));
+if f_scale < eps
+    f_scale = 1;
+end
+fn = f / f_scale;
+
+ph = unwrap(angle(z));
+mask = true(size(ph));
+fit_order = max(1, min(round(fit_order), 3));
+max_iters = max(1, round(max_iters));
+
+for it = 1:max_iters
+    if nnz(mask) <= fit_order + 2
+        mask(:) = true;
+    end
+    p = polyfit(fn(mask), ph(mask), fit_order);
+    ph_fit = polyval(p, fn);
+    res_circ = angle(exp(1j * (ph - ph_fit)));
+    med_res = median(res_circ(mask));
+    mad_res = median(abs(res_circ(mask) - med_res)) + eps;
+    sigma = 1.4826 * mad_res;
+    new_mask = abs(res_circ - med_res) <= max(pi/10, outlier_sigma * sigma);
+    if nnz(new_mask) <= fit_order + 2 || isequal(new_mask, mask)
+        break;
+    end
+    mask = new_mask;
+end
+
+rel_scale = rel_freq / f_scale;
+phase_full = polyval(p, rel_scale);
+phase_full = phase_full(:);
+
+res_final = angle(exp(1j * (ph - polyval(p, fn))));
+info = struct();
+info.coherence = abs(mean(exp(1j * res_final(mask))));
+info.n_used = nnz(mask);
+info.phase0 = polyval(p, 0);
+if fit_order >= 1
+    info.slope = p(end-1) / f_scale;
+else
+    info.slope = 0;
+end
+end
+
+function [phase_full, info] = fit_ref_segment_anchor_phase_local( ...
+    x_freq, ref_syms_full, rel_freq, valid_idxs, seg_len, min_coh, fit_order, min_segments)
+% 分段用参考序列去调制，形成可信相位锚点，再用锚点拟合平滑补偿曲线。
+x_freq = x_freq(:);
+ref_syms_full = ref_syms_full(:);
+rel_freq = rel_freq(:);
+valid_idxs = valid_idxs(:);
+seg_len = max(8, round(seg_len));
+fit_order = max(1, min(round(fit_order), 3));
+min_segments = max(fit_order + 1, round(min_segments));
+
+f_valid = rel_freq(valid_idxs);
+[f_sorted, ord] = sort(f_valid);
+idx_sorted = valid_idxs(ord);
+
+anchors_f = [];
+anchors_phase = [];
+anchors_coh = [];
+
+seg_start = 1;
+while seg_start <= numel(idx_sorted)
+    seg_end = min(numel(idx_sorted), seg_start + seg_len - 1);
+    seg_idx = idx_sorted(seg_start:seg_end);
+    seg_f = f_sorted(seg_start:seg_end);
+
+    z = x_freq(seg_idx) .* conj(ref_syms_full(seg_idx));
+    z = z ./ (abs(z) + eps);
+    z_mean = mean(z);
+    coh = abs(z_mean);
+
+    if coh >= min_coh && numel(seg_idx) >= max(8, floor(seg_len/3))
+        anchors_f(end+1,1) = mean(seg_f); %#ok<AGROW>
+        anchors_phase(end+1,1) = angle(z_mean); %#ok<AGROW>
+        anchors_coh(end+1,1) = coh; %#ok<AGROW>
+    end
+
+    seg_start = seg_end + 1;
+end
+
+if numel(anchors_f) < min_segments
+    error('可信相位锚点不足: got=%d, need=%d', numel(anchors_f), min_segments);
+end
+
+[anchors_f, ord_anchor] = sort(anchors_f);
+anchors_phase = unwrap(anchors_phase(ord_anchor));
+anchors_coh = anchors_coh(ord_anchor);
+
+f_scale = max(abs(anchors_f));
+if f_scale < eps
+    f_scale = 1;
+end
+fn_anchor = anchors_f / f_scale;
+fit_order = min(fit_order, numel(anchors_f)-1);
+
+p = weighted_polyfit_local(fn_anchor, anchors_phase, fit_order, anchors_coh);
+phase_full = polyval(p, rel_freq / f_scale);
+phase_full = phase_full(:);
+
+res = angle(exp(1j * (anchors_phase - polyval(p, fn_anchor))));
+info = struct();
+info.n_anchor = numel(anchors_f);
+info.mean_coh = mean(anchors_coh);
+info.fit_res_rms = sqrt(mean(res.^2));
+info.phase0 = polyval(p, 0);
+if fit_order >= 1
+    info.slope = p(end-1) / f_scale;
+else
+    info.slope = 0;
+end
+end
+
+function p = weighted_polyfit_local(x, y, order, w)
+x = x(:);
+y = y(:);
+w = max(w(:), eps);
+V = zeros(numel(x), order + 1);
+for k = 0:order
+    V(:, order + 1 - k) = x.^k;
+end
+sw = sqrt(w);
+p = (V .* sw) \ (y .* sw);
+p = p(:).';
+end
+
+function h_smooth = smooth_freq_response_local(h, rel_freq, smooth_bins)
+h = h(:);
+rel_freq = rel_freq(:);
+smooth_bins = max(1, round(smooth_bins));
+if mod(smooth_bins, 2) == 0
+    smooth_bins = smooth_bins + 1;
+end
+
+[~, ord] = sort(rel_freq);
+h_sorted = h(ord);
+
+if smooth_bins > 1
+    h_pad = [repmat(h_sorted(1), floor(smooth_bins/2), 1); ...
+             h_sorted; ...
+             repmat(h_sorted(end), floor(smooth_bins/2), 1)];
+    h_sm_sorted = movmean(h_pad, smooth_bins);
+    h_sm_sorted = h_sm_sorted(floor(smooth_bins/2)+1:end-floor(smooth_bins/2));
+else
+    h_sm_sorted = h_sorted;
+end
+
+h_sm_sorted = h_sm_sorted ./ (abs(h_sm_sorted) + eps);
+h_smooth = zeros(size(h));
+h_smooth(ord) = h_sm_sorted;
+end
+
+function hex_str = bits_to_hex_local(bits)
+bits = bits(:);
+hex_str = '';
+for i_hex = 1:4:length(bits)
+    chunk = bits(i_hex:min(i_hex+3, length(bits)));
+    val = 0;
+    for b = 1:length(chunk)
+        val = val + chunk(b) * 2^(length(chunk)-b);
+    end
+    hex_str = [hex_str, dec2hex(val)]; %#ok<AGROW>
+end
+end
 
 function [f_center_pilot_hz, info] = estimate_center_pilot_blind_from_signal( ...
     x, Fs, target_bw_hz, bw_tol_ratio, occ_bg_win_hz, occ_smooth_hz, occ_thresh_db, min_component_bw_hz, ...
