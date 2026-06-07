@@ -33,6 +33,9 @@ time_plot_max_points = 2e6;     % 显示抽点上限（仅影响绘图，不影�
 read_length = 6992*3 + 1000;   % 从 read_start_sample 开始读取长度（409.6MHz采样率）
 sss_decode_start_idx = 1024 + 48;
 target_offset = 0;
+enable_isolated_sss_demod_stream = true; % 同步流与SSS解调流分离，避免PSS/周边干扰进入降采样链路
+isolated_sss_pre_guard_60 = 0;           % 独立SSS流在SSS前保留的60MHz样点；0表示不读PSS尾部
+isolated_sss_post_guard_60 = 2048;       % 独立SSS流在SSS后保留的60MHz样点，用于滤波/重采样余量
 
 fs_source = 409.6e6;
 fs_target = 60e6;
@@ -77,6 +80,12 @@ N_fft = 1024;
 demod_all_subcarriers = true;
 decision_rotate_deg = 45;
 
+% SSS 解调前的干净上下文构造：
+% raw: 在409.6MHz域先构造 [SSS; SSS; SSS]，再做DDC/低通/SRO。
+% post_sro: 在SRO后、FFT前构造 [SSS; SSS; SSS]。
+enable_raw_sss_repeat_context = true;
+enable_sss_repeat_context = false;
+
 % x_raw 归一化方式：
 % 'full_mean'        -> 原始整段 read_length 去均值/按 mean(abs) 缩放
 % 'sss_local_robust' -> 仅用 SSS 附近局部窗口估计 DC/幅度，降低区外干扰影响
@@ -110,12 +119,12 @@ ref_guided_fit_max_iters = 3;       % 残差剔除迭代次数
 ref_guided_fit_outlier_sigma = 3.0; % 残差剔除强度
 enable_ref_segment_anchor_fit = true; % 分段参考锚点拟合，抗局部受扰载波段
 ref_anchor_seg_len = 48;              % 每段有效载波数
-ref_anchor_min_coh = 0.3;            % 分段相位锚点最低可信度
+ref_anchor_min_coh = 0.1;            % 分段相位锚点最低可信度
 ref_anchor_fit_order = 2;             % 锚点拟合阶数
 ref_anchor_min_segments = 5;          % 最少可信锚点段数
 enable_ref_aided_eq = false;       % 强制感较重的逐子载波相位均衡，默认关闭
 ref_aided_eq_smooth_bins = 3;      % 越小越“贴参考”，1 会退化成几乎逐子载波相位强制对齐
-ref_offset_search = -24:24;        % 在 target_offset 附近搜索的 60MHz 样点偏移
+ref_offset_search = -8:8;        % 在 target_offset 附近搜索的 60MHz 样点偏移
 ref_accept_ber_thresh = 0.03;      % 超过该 BER 则判为无法可靠锁定，不硬改结果
 % 预设正确值（4组）。可填你在 sss_group_summary_173.csv 的 voted_hex
 ber_ref_hex_list = {
@@ -313,15 +322,60 @@ for run_idx = 1:length(read_start_sample_list)
     fprintf('Step 3: 使用 [%s] 起始点 (read_start_sample=%d) 进行 SSS 解调...\n', current_mode, read_start_sample);
     fprintf('========================================================================\n');
     
-    fprintf('Loading file: %s from %d, len %d...\n', inFile, read_start_sample, read_length);
-[x_raw, ~] = read_iq_auto_local(inFile, read_start_sample, read_length, input_format, dat_header_bytes);
+if enable_isolated_sss_demod_stream
+    demod_stream_start_60 = max(1, sss_decode_start_idx - isolated_sss_pre_guard_60);
+    demod_stream_end_60 = sss_decode_start_idx + N_fft - 1 + isolated_sss_post_guard_60;
+    demod_stream_start_offset_raw = floor((demod_stream_start_60 - 1) * fs_source / fs_target);
+    demod_stream_len_raw = ceil((demod_stream_end_60 - demod_stream_start_60 + 1) * fs_source / fs_target) + 8;
+    demod_read_start_sample = read_start_sample + demod_stream_start_offset_raw;
+    demod_read_length = min(round(demod_stream_len_raw), totalSamples - demod_read_start_sample);
+    sss_decode_start_idx_eff = max(1, sss_decode_start_idx - demod_stream_start_60 + 1);
+else
+    demod_read_start_sample = read_start_sample;
+    demod_read_length = read_length;
+    sss_decode_start_idx_eff = sss_decode_start_idx;
+end
+
+if demod_read_start_sample < 0 || demod_read_start_sample >= totalSamples
+    error('SSS 解调流读取起点越界: %d / total=%d', demod_read_start_sample, totalSamples);
+end
+if demod_read_length <= 0
+    error('SSS 解调流读取长度无效: %d', demod_read_length);
+end
+
+fprintf(['Loading demod stream: %s from %d, len %d ' ...
+         '(isolated=%d, sync_start=%d, sss_idx_eff=%d)...\n'], ...
+    inFile, demod_read_start_sample, demod_read_length, ...
+    enable_isolated_sss_demod_stream, read_start_sample, sss_decode_start_idx_eff);
+[x_raw, ~] = read_iq_auto_local(inFile, demod_read_start_sample, demod_read_length, input_format, dat_header_bytes);
 x_raw = double(x_raw);
 
 if isempty(x_raw)
     error('SSS 解调阶段读取为空。');
 end
 
-sss_start_idx_60_for_norm = sss_decode_start_idx + target_offset;
+if enable_raw_sss_repeat_context
+    raw_center_start_60 = sss_decode_start_idx_eff + target_offset;
+    raw_center_end_60 = raw_center_start_60 + N_fft - 1;
+    raw_center_start = max(1, floor((raw_center_start_60 - 1) * fs_source / fs_target) + 1);
+    raw_center_end = min(length(x_raw), ceil((raw_center_end_60 - 1) * fs_source / fs_target) + 1);
+    if raw_center_start < 1 || raw_center_end > length(x_raw) || raw_center_end <= raw_center_start
+        error('raw SSS repeat context 中心窗口越界: raw=%d:%d, len=%d', ...
+            raw_center_start, raw_center_end, length(x_raw));
+    end
+
+    x_raw_center = x_raw(raw_center_start:raw_center_end);
+    raw_center_len = length(x_raw_center);
+    x_raw = [x_raw_center; x_raw_center; x_raw_center];
+    sss_decode_start_idx_eff = floor((raw_center_len + 1 - 1) * fs_target / fs_source) + 1;
+    fprintf(['Raw SSS repeat context: enable=1, center_raw=%d:%d (%d samples), ' ...
+             'new_len=%d, sss_idx_eff=%d\n'], ...
+        raw_center_start, raw_center_end, raw_center_len, length(x_raw), sss_decode_start_idx_eff);
+else
+    fprintf('Raw SSS repeat context: enable=0\n');
+end
+
+sss_start_idx_60_for_norm = sss_decode_start_idx_eff + target_offset;
 norm_start_60 = max(1, sss_start_idx_60_for_norm - raw_norm_guard_60);
 norm_end_60 = sss_start_idx_60_for_norm + N_fft - 1 + raw_norm_guard_60;
 norm_start_raw = max(1, floor((norm_start_60 - 1) * fs_source / fs_target) + 1);
@@ -408,7 +462,7 @@ end
 fprintf('Applying SRO Correction (Farrow): %.2f ppm...\n', sro_ppm);
 fs_eff = fs_source * (1 + sro_ppm/1e6);
 
-Wn = 35e6 / (fs_source/2);
+Wn = 32e6 / (fs_source/2);
 lpf_order = 30;
 b_lpf = fir1(lpf_order, Wn);
 
@@ -457,7 +511,7 @@ x_sro = h0 .* x_filt(idx_base - 1) + ...
 x_sro = x_sro(:);
 
 %% 3.3 SSS 频域解调（可选参考辅助 offset 选择）
-base_start_idx = sss_decode_start_idx;
+base_start_idx = sss_decode_start_idx_eff;
 if enable_ref_aided_select
     offset_candidates = unique(target_offset + ref_offset_search(:).');
 else
@@ -473,7 +527,8 @@ fprintf('Reference-aided offset search: enable=%d, candidates=%s, acceptBER=%.4g
 for off_try = offset_candidates
     try
         trial = demod_sss_once_local( ...
-            x_sro, base_start_idx, off_try, N_fft, valid_carrier_mode, ...
+            x_sro, base_start_idx, off_try, target_offset, N_fft, ...
+            (enable_sss_repeat_context && ~enable_raw_sss_repeat_context), valid_carrier_mode, ...
             valid_carrier_power_threshold_ratio, valid_carrier_dc_guard, ...
             fixed_valid_rel_freq_indices, fixed_valid_fft_bins, ...
             demod_all_subcarriers, decision_rotate_deg, ...
@@ -560,6 +615,8 @@ fprintf(['Valid carriers: mode=%s, count=%d/%d, segments=%d, longest=%d, ' ...
 fprintf('Valid carrier rel-freq ranges: %s\n', best_trial.valid_ranges);
 fprintf('SSS phase fit: slope_coh=%.3f, phase0_coh=%.3f, adjacent_pairs=%d\n', ...
     best_trial.slope_coherence, best_trial.phase0_coherence, best_trial.adjacent_pairs);
+fprintf('SSS repeat context: raw=%d, post_sro=%d, center_offset=%+d\n', ...
+    enable_raw_sss_repeat_context, (enable_sss_repeat_context && ~enable_raw_sss_repeat_context), target_offset);
 fprintf('SSS compensation selected: %s, compBER=%.6g, compRef=%d, compRotIdx=%d, compCoh=%.3f\n', ...
     best_trial.comp_mode, best_trial.comp_score_ber, best_trial.comp_score_ref_idx, ...
     best_trial.comp_score_rot_idx, best_trial.comp_coh);
@@ -673,7 +730,8 @@ end
 end % end for run_idx
 
 function trial = demod_sss_once_local( ...
-    x_sro, base_start_idx, offset, N_fft, valid_carrier_mode, ...
+    x_sro, base_start_idx, offset, context_center_offset, N_fft, ...
+    enable_sss_repeat_context, valid_carrier_mode, ...
     valid_carrier_power_threshold_ratio, valid_carrier_dc_guard, ...
     fixed_valid_rel_freq_indices, fixed_valid_fft_bins, ...
     demod_all_subcarriers, decision_rotate_deg, ...
@@ -685,16 +743,31 @@ function trial = demod_sss_once_local( ...
     enable_ref_aided_eq, ref_aided_eq_smooth_bins, ...
     unstable_bit_positions, unstable_nibble_positions, verbose)
 
-if nargin < 27
+if nargin < 29
     verbose = false;
 end
 
 sss_start_idx_60 = base_start_idx + offset;
-if sss_start_idx_60 < 1 || sss_start_idx_60 + N_fft > length(x_sro)
+if sss_start_idx_60 < 1 || sss_start_idx_60 + N_fft - 1 > length(x_sro)
     error('SSS 起始点越界: idx=%d, len=%d', sss_start_idx_60, length(x_sro));
 end
 
-x_sss_time = x_sro(sss_start_idx_60 : sss_start_idx_60 + N_fft - 1);
+if enable_sss_repeat_context
+    context_center_start = base_start_idx + context_center_offset;
+    if context_center_start < 1 || context_center_start + N_fft - 1 > length(x_sro)
+        error('SSS repeat context 中心窗口越界: idx=%d, len=%d', context_center_start, length(x_sro));
+    end
+
+    x_sss_center = x_sro(context_center_start : context_center_start + N_fft - 1);
+    x_sss_repeat = [x_sss_center; x_sss_center; x_sss_center];
+    repeat_start = N_fft + 1 + (offset - context_center_offset);
+    if repeat_start < 1 || repeat_start + N_fft - 1 > length(x_sss_repeat)
+        error('SSS repeat context offset 越界: offset=%d, center=%d', offset, context_center_offset);
+    end
+    x_sss_time = x_sss_repeat(repeat_start : repeat_start + N_fft - 1);
+else
+    x_sss_time = x_sro(sss_start_idx_60 : sss_start_idx_60 + N_fft - 1);
+end
 x_sss_freq = fft(x_sss_time, N_fft) / sqrt(N_fft);
 
 rel_freq = zeros(N_fft,1);
